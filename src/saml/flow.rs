@@ -3,8 +3,9 @@ use crate::openvpn::management::ManagementClient;
 use crate::openvpn::parser::ManagementEvent;
 use crate::saml::acs::SamlAcsServer;
 use crate::saml::browser::open_browser;
-use crate::{BrowserMode, Error, Result};
+use crate::{BrowserMode, Error, Result, VpnEvent};
 use std::net::IpAddr;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SamlAuthOutcome {
@@ -15,6 +16,7 @@ pub async fn drive_saml_auth(
     management: &mut ManagementClient,
     acs: &SamlAcsServer,
     browser: BrowserMode,
+    event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
 ) -> Result<SamlAuthOutcome> {
     management.enable_notifications_and_release_hold().await?;
 
@@ -31,16 +33,25 @@ pub async fn drive_saml_auth(
 
         match event {
             ManagementEvent::AuthPrompt if pending_state_id.is_none() => {
+                tracing::debug!("received initial OpenVPN auth prompt");
+                emit(&event_tx, VpnEvent::AuthPromptReceived);
                 management.send(&auth_username()).await?;
                 management.send(&acs_password(acs_port)).await?;
             }
             ManagementEvent::SamlChallenge(challenge) => {
+                tracing::info!("received SAML challenge from VPN endpoint");
+                emit(&event_tx, VpnEvent::SamlChallengeReceived);
                 open_browser(&challenge.url, browser)?;
+                emit(&event_tx, VpnEvent::BrowserOpened);
+                tracing::debug!("waiting for SAML assertion callback");
                 let assertion = acs.receive_once().await?;
+                tracing::debug!("received SAML assertion callback");
+                emit(&event_tx, VpnEvent::SamlAssertionReceived);
                 pending_state_id = Some(challenge.state_id);
                 pending_assertion = Some(assertion.expose_for_openvpn().to_string());
             }
             ManagementEvent::AuthPrompt => {
+                tracing::debug!("received final OpenVPN auth prompt; sending SAML assertion");
                 let state_id = pending_state_id.take().ok_or_else(|| {
                     Error::ManagementProtocol(
                         "received second auth prompt before CRV1 challenge".to_string(),
@@ -58,6 +69,7 @@ pub async fn drive_saml_auth(
                     .await?;
             }
             ManagementEvent::Connected { vpn_ip } => {
+                tracing::info!(?vpn_ip, "VPN connected");
                 return Ok(SamlAuthOutcome { vpn_ip });
             }
             ManagementEvent::AuthFailed(message) => return Err(Error::AuthFailed(message)),
@@ -69,6 +81,12 @@ pub async fn drive_saml_auth(
             }
             ManagementEvent::Log(_) | ManagementEvent::Ignored => {}
         }
+    }
+}
+
+fn emit(event_tx: &Option<mpsc::UnboundedSender<VpnEvent>>, event: VpnEvent) {
+    if let Some(event_tx) = event_tx {
+        let _ = event_tx.send(event);
     }
 }
 
@@ -140,7 +158,7 @@ mod tests {
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
         let client_flow = tokio::spawn(async move {
-            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled).await
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
         });
 
         post_saml_response(acs_addr, "assertion-value").await;
@@ -165,7 +183,7 @@ mod tests {
         });
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
-        let err = drive_saml_auth(&mut management, &acs, BrowserMode::Disabled)
+        let err = drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None)
             .await
             .unwrap_err();
 

@@ -68,6 +68,7 @@ impl ManagementClient {
     }
 
     pub async fn authenticate(&mut self, password: &str) -> Result<()> {
+        tracing::debug!("waiting for OpenVPN management password prompt");
         loop {
             let Some(line) = self.read_line().await? else {
                 return Err(Error::ManagementProtocol(
@@ -75,6 +76,7 @@ impl ManagementClient {
                 ));
             };
 
+            tracing::debug!("received OpenVPN management authentication line");
             if line.starts_with("ENTER PASSWORD:") {
                 self.send_raw_line(password).await?;
                 continue;

@@ -481,9 +481,9 @@ Do not base the final packaged binary on the older `samm-git` OpenVPN 2.5.x patc
 - [ ] Add `--debug`.
 - [ ] Add `--no-browser`.
 - [ ] Add `--print-login-url`.
-- [ ] Add signal handling for Ctrl-C.
+- [x] Add signal handling for Ctrl-C.
 - [ ] Map library errors to actionable CLI messages.
-- [ ] Ensure CLI logs are redacted by default.
+- [x] Ensure CLI logs are redacted by default.
 
 ### Config Parsing
 
@@ -502,7 +502,7 @@ Do not base the final packaged binary on the older `samm-git` OpenVPN 2.5.x patc
 - [x] Generate management password.
 - [x] Write management password file with `0600` permissions.
 - [x] Spawn OpenVPN with management arguments.
-- [ ] Pipe stdout/stderr into sanitized event/log stream.
+- [x] Pipe stdout/stderr into sanitized event/log stream.
 - [x] Track process ID.
 - [x] Implement graceful shutdown.
 - [x] Kill child only after graceful shutdown timeout.
@@ -580,10 +580,10 @@ OpenVPN args for MVP:
 
 ### SAML Flow Orchestrator
 
-- [ ] Coordinate ACS server, management events, browser opener, and assertion delivery.
-- [ ] Track pending CRV1 `state_id`.
+- [x] Coordinate ACS server, management events, browser opener, and assertion delivery.
+- [x] Track pending CRV1 `state_id`.
 - [ ] Refuse unexpected ACS submissions before a challenge is active.
-- [ ] Apply 10 minute auth timeout.
+- [x] Apply 10 minute auth timeout.
 - [ ] Redact all sensitive data in errors/events.
 - [ ] Ensure assertion is zeroized/dropped after sending.
 - [ ] Handle user interruption while waiting for browser login.
@@ -601,13 +601,13 @@ OpenVPN args for MVP:
 
 ### Logging and Redaction
 
-- [ ] Implement `logredact::redact_line`.
-- [ ] Redact `password "Auth" ...`.
-- [ ] Redact `CRV1::<state>::<assertion>`.
-- [ ] Redact `SAMLResponse=...`.
+- [x] Implement `logredact::redact_line`.
+- [x] Redact `password "Auth" ...`.
+- [x] Redact `CRV1::<state>::<assertion>`.
+- [x] Redact `SAMLResponse=...`.
 - [ ] Redact management password file content.
 - [ ] Consider redacting SAML login URL by default.
-- [ ] Unit test common sensitive line shapes.
+- [x] Unit test common sensitive line shapes.
 
 ### Tests
 

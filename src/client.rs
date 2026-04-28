@@ -3,10 +3,12 @@ use crate::openvpn::management::ManagementClient;
 use crate::openvpn::process::{OpenVpnLaunchOptions, OpenVpnPrepared, OpenVpnProcess};
 use crate::saml::acs::SamlAcsServer;
 use crate::saml::flow::drive_saml_auth;
-use crate::{Error, ExitReason, Result};
+use crate::{Error, ExitReason, Result, VpnEvent};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
@@ -39,6 +41,7 @@ pub struct ConnectOptions {
     pub log_level: LogLevel,
     pub dns_mode: DnsMode,
     pub print_login_url: bool,
+    pub event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
 }
 
 impl ConnectOptions {
@@ -55,6 +58,7 @@ impl ConnectOptions {
             log_level: LogLevel::Info,
             dns_mode: DnsMode::OpenVpnDefault,
             print_login_url: false,
+            event_tx: None,
         }
     }
 
@@ -75,6 +79,11 @@ impl ConnectOptions {
 
     pub fn with_print_login_url(mut self, print_login_url: bool) -> Self {
         self.print_login_url = print_login_url;
+        self
+    }
+
+    pub fn with_event_sender(mut self, event_tx: mpsc::UnboundedSender<VpnEvent>) -> Self {
+        self.event_tx = Some(event_tx);
         self
     }
 
@@ -151,11 +160,13 @@ impl VpnClient {
 
     pub async fn connect(&self, options: ConnectOptions) -> Result<VpnSession> {
         options.validate()?;
+        tracing::debug!(config = %options.config_path.display(), "validated VPN config");
         let openvpn_binary = options
             .openvpn_binary
             .clone()
             .ok_or(Error::OpenVpnNotFound)?;
 
+        tracing::debug!(host = %options.acs_host, port = options.acs_port, "binding SAML ACS server");
         let acs =
             SamlAcsServer::bind(options.acs_host, options.acs_port, options.auth_timeout).await?;
 
@@ -166,25 +177,53 @@ impl VpnClient {
             management_port: options.management_port,
         })?;
 
-        let mut openvpn = prepared.spawn().await?;
+        let (internal_event_tx, event_rx) = mpsc::unbounded_channel();
+        let event_tx = options.event_tx.clone().unwrap_or(internal_event_tx);
+        tracing::debug!("spawning OpenVPN process");
+        let mut openvpn = prepared.spawn(Some(event_tx.clone())).await?;
+        tracing::debug!(management_addr = %openvpn.management_addr(), "connecting to OpenVPN management socket");
         let mut management = ManagementClient::connect_with_retry(
             openvpn.management_addr(),
             Duration::from_secs(10),
         )
         .await?;
-        management
-            .authenticate(openvpn.management_password())
-            .await?;
+        let _ = event_tx.send(VpnEvent::ManagementConnected);
+        tracing::debug!("authenticating to OpenVPN management socket");
+        time::timeout(
+            Duration::from_secs(10),
+            management.authenticate(openvpn.management_password()),
+        )
+        .await
+        .map_err(|_| {
+            Error::ManagementProtocol(
+                "timed out waiting for OpenVPN management authentication".to_string(),
+            )
+        })??;
 
-        if let Err(err) = drive_saml_auth(&mut management, &acs, options.browser).await {
-            let _ = management.shutdown().await;
-            let _ = openvpn.terminate(Duration::from_secs(3)).await;
-            return Err(err);
-        }
+        tracing::debug!("starting SAML auth flow");
+        let outcome = match drive_saml_auth(
+            &mut management,
+            &acs,
+            options.browser,
+            Some(event_tx.clone()),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let _ = management.shutdown().await;
+                let _ = openvpn.terminate(Duration::from_secs(3)).await;
+                return Err(err);
+            }
+        };
+        let _ = event_tx.send(VpnEvent::Connected {
+            vpn_ip: outcome.vpn_ip,
+        });
 
         Ok(VpnSession {
             openvpn,
             management: Some(management),
+            event_rx: options.event_tx.is_none().then_some(event_rx),
         })
     }
 }
@@ -193,9 +232,18 @@ impl VpnClient {
 pub struct VpnSession {
     openvpn: OpenVpnProcess,
     management: Option<ManagementClient>,
+    event_rx: Option<mpsc::UnboundedReceiver<VpnEvent>>,
 }
 
 impl VpnSession {
+    pub fn pid(&self) -> Option<u32> {
+        self.openvpn.pid()
+    }
+
+    pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<VpnEvent>> {
+        self.event_rx.take()
+    }
+
     pub async fn wait(&mut self) -> Result<ExitReason> {
         self.openvpn.wait().await?;
         Ok(ExitReason::OpenVpnExited)

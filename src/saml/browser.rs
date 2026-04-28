@@ -1,5 +1,4 @@
 use crate::{BrowserMode, Error, Result};
-use std::process::Command;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,42 +12,10 @@ pub fn open_browser(url: &Url, mode: BrowserMode) -> Result<BrowserOpenResult> {
         return Ok(BrowserOpenResult::Disabled);
     }
 
-    let mut command = browser_command(url);
-    command
-        .spawn()
-        .map_err(Error::BrowserLaunchFailed)?
-        .wait()
-        .map_err(Error::BrowserLaunchFailed)?;
+    tracing::info!("opening SAML login URL in default browser");
+    webbrowser::open(url.as_str()).map_err(Error::BrowserLaunchFailed)?;
 
     Ok(BrowserOpenResult::Opened)
-}
-
-#[cfg(target_os = "macos")]
-fn browser_command(url: &Url) -> Command {
-    let mut command = Command::new("open");
-    command.arg(url.as_str());
-    command
-}
-
-#[cfg(target_os = "linux")]
-fn browser_command(url: &Url) -> Command {
-    let mut command = Command::new("xdg-open");
-    command.arg(url.as_str());
-    command
-}
-
-#[cfg(target_os = "windows")]
-fn browser_command(url: &Url) -> Command {
-    let mut command = Command::new("rundll32");
-    command.arg("url.dll,FileProtocolHandler").arg(url.as_str());
-    command
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn browser_command(url: &Url) -> Command {
-    let mut command = Command::new("xdg-open");
-    command.arg(url.as_str());
-    command
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
-use crate::{Error, Result};
+use crate::logredact::redact_line;
+use crate::{Error, Result, VpnEvent};
 use rand::Rng;
 use rand::distr::Alphanumeric;
 use std::fs::OpenOptions;
@@ -10,7 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time;
 
 #[derive(Debug, Clone)]
@@ -84,34 +88,51 @@ impl OpenVpnPrepared {
         ]
     }
 
-    pub async fn spawn(self) -> Result<OpenVpnProcess> {
+    pub async fn spawn(
+        self,
+        event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
+    ) -> Result<OpenVpnProcess> {
         let mut command = Command::new(&self.options.binary);
         command
             .args(self.args())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = command.spawn().map_err(Error::OpenVpnSpawnFailed)?;
+        let mut child = command.spawn().map_err(Error::OpenVpnSpawnFailed)?;
         let pid = child.id();
+        let mut log_tasks = Vec::new();
+
+        if let Some(tx) = &event_tx {
+            if let Some(stdout) = child.stdout.take() {
+                log_tasks.push(spawn_log_reader("openvpn stdout", stdout, tx.clone()));
+            }
+            if let Some(stderr) = child.stderr.take() {
+                log_tasks.push(spawn_log_reader("openvpn stderr", stderr, tx.clone()));
+            }
+            if let Some(pid) = pid {
+                let _ = tx.send(VpnEvent::OpenVpnStarted { pid });
+            }
+        }
 
         Ok(OpenVpnProcess {
             child,
             pid,
             management_addr: self.management_addr,
             management_password: self.management_password,
+            log_tasks,
             _workdir: self.workdir,
         })
     }
 }
 
-#[derive(Debug)]
 pub struct OpenVpnProcess {
     child: Child,
     pid: Option<u32>,
     management_addr: SocketAddr,
     management_password: String,
+    log_tasks: Vec<JoinHandle<()>>,
     _workdir: TempDir,
 }
 
@@ -134,6 +155,7 @@ impl OpenVpnProcess {
 
     pub async fn terminate(&mut self, timeout: Duration) -> Result<()> {
         if let Ok(Some(_)) = self.child.try_wait() {
+            self.abort_log_tasks();
             return Ok(());
         }
 
@@ -146,7 +168,24 @@ impl OpenVpnProcess {
                 let _ = self.child.kill().await;
             }
         }
+        self.abort_log_tasks();
         Ok(())
+    }
+
+    fn abort_log_tasks(&mut self) {
+        for task in self.log_tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl std::fmt::Debug for OpenVpnProcess {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenVpnProcess")
+            .field("pid", &self.pid)
+            .field("management_addr", &self.management_addr)
+            .finish_non_exhaustive()
     }
 }
 
@@ -186,11 +225,42 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn spawn_log_reader<R>(
+    source: &'static str,
+    reader: R,
+    tx: mpsc::UnboundedSender<VpnEvent>,
+) -> JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let line = redact_line(&line);
+                    let _ = tx.send(VpnEvent::Log {
+                        line: format!("{source}: {line}"),
+                    });
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    let _ = tx.send(VpnEvent::Warning {
+                        message: format!("{source} log stream failed: {err}"),
+                    });
+                    break;
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::net::Ipv4Addr;
+    use tokio::sync::mpsc;
 
     #[test]
     fn reserves_loopback_management_port() {
@@ -249,5 +319,50 @@ mod tests {
         assert!(args.contains(&"47000".to_string()));
         assert!(args.contains(&"--management-query-passwords".to_string()));
         assert!(args.contains(&"--management-hold".to_string()));
+    }
+
+    #[tokio::test]
+    async fn streams_redacted_openvpn_output() {
+        let script = "printf 'password \"Auth\" CRV1::state::secret\\n'; printf 'SAMLResponse=secret&x=y\\n' >&2";
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: PathBuf::from("/bin/sh"),
+            config: PathBuf::from("/tmp/client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47001),
+        })
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let mut process = OpenVpnProcess {
+            pid: child.id(),
+            management_addr: prepared.management_addr(),
+            management_password: prepared.management_password().to_string(),
+            log_tasks: vec![
+                spawn_log_reader("openvpn stdout", child.stdout.take().unwrap(), tx.clone()),
+                spawn_log_reader("openvpn stderr", child.stderr.take().unwrap(), tx),
+            ],
+            child,
+            _workdir: prepared.workdir,
+        };
+
+        process.wait().await.unwrap();
+        let mut logs = Vec::new();
+        while let Ok(Some(event)) = time::timeout(Duration::from_millis(100), rx.recv()).await {
+            if let VpnEvent::Log { line } = event {
+                logs.push(line);
+            }
+        }
+
+        assert!(logs.iter().any(|line| line.contains("[REDACTED]")));
+        assert!(!logs.iter().any(|line| line.contains("secret")));
     }
 }
