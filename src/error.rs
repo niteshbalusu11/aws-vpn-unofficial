@@ -11,6 +11,12 @@ pub enum Error {
     #[error("OpenVPN binary was not found")]
     OpenVpnNotFound,
 
+    #[error("bundled OpenVPN runtime is not available for target {target}")]
+    BundledOpenVpnUnavailable { target: &'static str },
+
+    #[error("bundled OpenVPN runtime is invalid: {0}")]
+    BundledOpenVpnInvalid(String),
+
     #[error("OpenVPN process support is not implemented yet")]
     OpenVpnProcessNotImplemented,
 

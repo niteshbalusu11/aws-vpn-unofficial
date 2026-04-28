@@ -62,6 +62,7 @@ Environment overrides:
   DIST_DIR                staged runtime output directory
   OPENSSL_TARGET          OpenSSL Configure target override
   OPENVPN_CONFIGURE_ARGS  extra OpenVPN ./configure arguments
+  EMBED_RUNTIME           when set to 1, copy staged runtime into assets/openvpn-runtime
   JOBS                    make parallelism
 EOF
 }
@@ -226,6 +227,20 @@ Source: $SOURCE_URL
 Source SHA256: $SOURCE_SHA256
 Target: $TARGET
 EOF
+
+  stage_embedded_runtime_asset
+}
+
+stage_embedded_runtime_asset() {
+  if [[ "${EMBED_RUNTIME:-0}" != 1 ]]; then
+    return
+  fi
+
+  local asset_dir="$REPO_ROOT/assets/openvpn-runtime/$TARGET/openvpn"
+  rm -rf "$asset_dir"
+  mkdir -p "$asset_dir"
+  cp -R "$DIST_DIR"/. "$asset_dir"/
+  printf 'Embedded runtime asset staged at %s\n' "$asset_dir"
 }
 
 stage_platform_helpers() {

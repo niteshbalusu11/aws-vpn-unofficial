@@ -1,0 +1,157 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="State:/Network/awsvpn"
+DEFAULT_DOMAIN="${AWSVPN_DEFAULT_DOMAIN:-openvpn}"
+
+log() {
+  printf '%s\n' "awsvpn client.up: $*" >&2
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    log "missing required command: $1"
+    exit 1
+  fi
+}
+
+primary_service_id() {
+  /usr/sbin/scutil <<'EOF' | awk '/PrimaryService[[:space:]]*:/ { print $3; exit }'
+show State:/Network/Global/IPv4
+EOF
+}
+
+scutil_key_exists() {
+  key="$1"
+  output="$(/usr/sbin/scutil <<EOF 2>&1
+show $key
+EOF
+)"
+  ! printf '%s\n' "$output" | grep -q "No such key"
+}
+
+save_existing_dns() {
+  psid="$1"
+
+  /usr/sbin/scutil <<EOF >/dev/null
+remove $STATE_ROOT/OldDNSSetup
+remove $STATE_ROOT
+EOF
+
+  if scutil_key_exists "Setup:/Network/Service/$psid/DNS"; then
+    /usr/sbin/scutil <<EOF >/dev/null
+get Setup:/Network/Service/$psid/DNS
+set $STATE_ROOT/OldDNSSetup
+d.init
+d.add PrimaryService $psid
+d.add HadDNS 1
+set $STATE_ROOT
+EOF
+  else
+    /usr/sbin/scutil <<EOF >/dev/null
+d.init
+d.add PrimaryService $psid
+d.add HadDNS 0
+set $STATE_ROOT
+EOF
+  fi
+}
+
+flush_dns_cache() {
+  if [ -x /usr/bin/dscacheutil ]; then
+    /usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true
+  fi
+
+  if [ -x /usr/bin/killall ]; then
+    /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+    /usr/bin/killall -HUP mDNSResponderHelper >/dev/null 2>&1 || true
+  fi
+}
+
+add_unique_word() {
+  list="$1"
+  word="$2"
+
+  case " $list " in
+    *" $word "*) printf '%s' "$list" ;;
+    *) printf '%s' "${list:+$list }$word" ;;
+  esac
+}
+
+collect_openvpn_dns_options() {
+  dns_servers=""
+  search_domains=""
+  domain_name=""
+
+  index=1
+  while [ "$index" -le 255 ]; do
+    eval "option=\${foreign_option_${index}:-}"
+    [ -z "$option" ] && {
+      index=$((index + 1))
+      continue
+    }
+
+    case "$option" in
+      "dhcp-option DNS "*)
+        value="${option#dhcp-option DNS }"
+        dns_servers="$(add_unique_word "$dns_servers" "$value")"
+        ;;
+      "dhcp-option DOMAIN "*)
+        domain_name="${option#dhcp-option DOMAIN }"
+        ;;
+      "dhcp-option DOMAIN-SEARCH "*)
+        value="${option#dhcp-option DOMAIN-SEARCH }"
+        search_domains="$(add_unique_word "$search_domains" "$value")"
+        ;;
+      "dhcp-option SEARCH-DOMAIN "*)
+        value="${option#dhcp-option SEARCH-DOMAIN }"
+        search_domains="$(add_unique_word "$search_domains" "$value")"
+        ;;
+    esac
+
+    index=$((index + 1))
+  done
+
+  [ -n "$dns_servers" ] || return 1
+
+  if [ -z "$domain_name" ]; then
+    domain_name="$DEFAULT_DOMAIN"
+  fi
+
+  if [ -z "$search_domains" ]; then
+    search_domains="$domain_name"
+  fi
+
+  export dns_servers search_domains domain_name
+}
+
+apply_dns() {
+  psid="$1"
+
+  /usr/sbin/scutil <<EOF >/dev/null
+d.init
+d.add ServerAddresses * $dns_servers
+d.add SearchDomains * $search_domains
+d.add DomainName $domain_name
+set Setup:/Network/Service/$psid/DNS
+EOF
+}
+
+require_command /usr/sbin/scutil
+
+if ! collect_openvpn_dns_options; then
+  log "no pushed DNS options found; leaving DNS unchanged"
+  exit 0
+fi
+
+psid="$(primary_service_id)"
+if [ -z "$psid" ]; then
+  log "could not determine primary network service"
+  exit 1
+fi
+
+save_existing_dns "$psid"
+apply_dns "$psid"
+flush_dns_cache
+
+log "configured DNS servers [$dns_servers] on primary service $psid"

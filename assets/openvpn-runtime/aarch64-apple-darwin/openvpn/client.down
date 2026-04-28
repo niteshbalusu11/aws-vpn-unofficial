@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+STATE_ROOT="State:/Network/awsvpn"
+
+log() {
+  printf '%s\n' "awsvpn client.down: $*" >&2
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    log "missing required command: $1"
+    exit 1
+  fi
+}
+
+state_value() {
+  key="$1"
+  /usr/sbin/scutil <<EOF | awk -v wanted="$key" '$1 == wanted && $2 == ":" { print $3; exit }'
+show $STATE_ROOT
+EOF
+}
+
+scutil_key_exists() {
+  key="$1"
+  output="$(/usr/sbin/scutil <<EOF 2>&1
+show $key
+EOF
+)"
+  ! printf '%s\n' "$output" | grep -q "No such key"
+}
+
+flush_dns_cache() {
+  if [ -x /usr/bin/dscacheutil ]; then
+    /usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true
+  fi
+
+  if [ -x /usr/bin/killall ]; then
+    /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+    /usr/bin/killall -HUP mDNSResponderHelper >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_state() {
+  /usr/sbin/scutil <<EOF >/dev/null
+remove $STATE_ROOT/OldDNSSetup
+remove $STATE_ROOT
+EOF
+}
+
+restore_dns() {
+  psid="$1"
+  had_dns="$2"
+
+  if [ "$had_dns" = "1" ] && scutil_key_exists "$STATE_ROOT/OldDNSSetup"; then
+    /usr/sbin/scutil <<EOF >/dev/null
+get $STATE_ROOT/OldDNSSetup
+set Setup:/Network/Service/$psid/DNS
+EOF
+    log "restored previous DNS on primary service $psid"
+  else
+    /usr/sbin/scutil <<EOF >/dev/null
+remove Setup:/Network/Service/$psid/DNS
+EOF
+    log "removed temporary DNS on primary service $psid"
+  fi
+}
+
+require_command /usr/sbin/scutil
+
+if ! scutil_key_exists "$STATE_ROOT"; then
+  log "no saved DNS state found; leaving DNS unchanged"
+  exit 0
+fi
+
+psid="$(state_value PrimaryService)"
+had_dns="$(state_value HadDNS)"
+
+if [ -z "$psid" ]; then
+  cleanup_state
+  log "saved DNS state had no primary service; leaving DNS unchanged"
+  exit 0
+fi
+
+restore_dns "$psid" "${had_dns:-0}"
+cleanup_state
+flush_dns_cache
