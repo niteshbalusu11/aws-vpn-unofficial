@@ -44,7 +44,6 @@ d.add ServerAddresses * {server_values}
 d.add SearchDomains * openvpn
 d.add DomainName openvpn
 set State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
-set Setup:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
 "
     );
 
@@ -53,8 +52,14 @@ set Setup:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_native_dns_impl(_servers: &[Ipv4Addr]) -> Result<Option<NativeDnsGuard>> {
-    Ok(None)
+fn configure_native_dns_impl(servers: &[Ipv4Addr]) -> Result<Option<NativeDnsGuard>> {
+    if servers.is_empty() {
+        return Ok(None);
+    }
+
+    Err(Error::DnsConfigurationFailed(
+        "native DNS configuration is not implemented for this platform; use trusted OpenVPN helper scripts or --dns disabled".to_string(),
+    ))
 }
 
 fn restore_native_dns(guard: &mut NativeDnsGuard) -> Result<()> {
@@ -70,9 +75,7 @@ fn restore_native_dns_impl(guard: &mut NativeDnsGuard) -> Result<()> {
     let commands = format!(
         "\
 remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
-remove Setup:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
 remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
-remove Setup:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
 "
     );
 

@@ -6,6 +6,7 @@ pub enum VpnEvent {
     ManagementConnected,
     AuthPromptReceived,
     SamlChallengeReceived,
+    SamlLoginUrl { url: String },
     BrowserOpened,
     SamlAssertionReceived,
     Connected { vpn_ip: Option<IpAddr> },

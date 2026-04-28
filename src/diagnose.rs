@@ -1,8 +1,11 @@
 use crate::{Error, Result};
 use std::net::Ipv4Addr;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 const AWS_SCRIPT_LOG_DIR: &str = "/Library/Application Support/AWSVPNClient";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +26,11 @@ pub struct RouteEntry {
 }
 
 pub fn collect_diagnostics() -> Result<Diagnostics> {
+    collect_diagnostics_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn collect_diagnostics_impl() -> Result<Diagnostics> {
     let dns_output = run_command("scutil", &["--dns"])?;
     let route_output = run_command("netstat", &["-rn", "-f", "inet"])?;
     let dns_servers = parse_dns_servers(&dns_output);
@@ -40,6 +48,14 @@ pub fn collect_diagnostics() -> Result<Diagnostics> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
+fn collect_diagnostics_impl() -> Result<Diagnostics> {
+    Err(Error::DiagnosticFailed(
+        "diagnostics are currently implemented only on macOS".to_string(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
 fn run_command(program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
@@ -56,6 +72,7 @@ fn run_command(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_dns_servers(output: &str) -> Vec<Ipv4Addr> {
     let mut servers = Vec::new();
 
@@ -77,6 +94,7 @@ fn parse_dns_servers(output: &str) -> Vec<Ipv4Addr> {
     servers
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_routes(output: &str) -> Vec<RouteEntry> {
     let mut routes = Vec::new();
 
@@ -103,6 +121,7 @@ fn parse_routes(output: &str) -> Vec<RouteEntry> {
     routes
 }
 
+#[cfg(target_os = "macos")]
 fn is_private_dns(addr: &Ipv4Addr) -> bool {
     addr.is_private()
 }
@@ -115,17 +134,17 @@ mod tests {
     fn parses_unique_ipv4_dns_servers() {
         let output = r#"
 resolver #1
-  nameserver[0] : 172.31.0.2
-  nameserver[1] : 172.31.0.2
+  nameserver[0] : 192.0.2.53
+  nameserver[1] : 192.0.2.53
 resolver #2
-  nameserver[0] : 170.250.249.249
+  nameserver[0] : 198.51.100.53
 "#;
 
         assert_eq!(
             parse_dns_servers(output),
             vec![
-                "172.31.0.2".parse::<Ipv4Addr>().unwrap(),
-                "170.250.249.249".parse::<Ipv4Addr>().unwrap()
+                "192.0.2.53".parse::<Ipv4Addr>().unwrap(),
+                "198.51.100.53".parse::<Ipv4Addr>().unwrap()
             ]
         );
     }
@@ -138,21 +157,21 @@ Routing tables
 Internet:
 Destination        Gateway            Flags               Netif Expire
 default            192.168.4.1        UGScg                 en0
-10.28/16           192.168.104.129    UGSc                utun6
-172.31             192.168.104.129    UGSc                utun6
+192.0.2/24         198.51.100.1       UGSc                utun6
+203.0.113/24       198.51.100.1       UGSc                utun6
 "#;
 
         assert_eq!(
             parse_routes(output),
             vec![
                 RouteEntry {
-                    destination: "10.28/16".to_string(),
-                    gateway: "192.168.104.129".to_string(),
+                    destination: "192.0.2/24".to_string(),
+                    gateway: "198.51.100.1".to_string(),
                     interface: "utun6".to_string(),
                 },
                 RouteEntry {
-                    destination: "172.31".to_string(),
-                    gateway: "192.168.104.129".to_string(),
+                    destination: "203.0.113/24".to_string(),
+                    gateway: "198.51.100.1".to_string(),
                     interface: "utun6".to_string(),
                 },
             ]

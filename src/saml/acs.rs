@@ -87,6 +87,12 @@ impl SamlAssertion {
             return Err(Error::SamlResponseTooLarge);
         }
 
+        if value.chars().any(char::is_control) {
+            return Err(Error::InvalidConfig(
+                "SAML response contains control characters".to_string(),
+            ));
+        }
+
         Ok(Self { value })
     }
 
@@ -361,6 +367,25 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
         assert!(matches!(err, Error::SamlResponseTooLarge));
+    }
+
+    #[tokio::test]
+    async fn rejects_control_characters_in_saml_response() {
+        let server = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move { server.receive_once().await });
+        let response = post_form(addr, "/", "SAMLResponse=assertion%0D%0Apassword")
+            .await
+            .unwrap();
+        let err = server_task.await.unwrap().unwrap_err();
+
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(
+            matches!(err, Error::InvalidConfig(message) if message.contains("control characters"))
+        );
     }
 
     #[tokio::test]

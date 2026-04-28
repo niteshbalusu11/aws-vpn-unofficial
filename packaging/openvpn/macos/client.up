@@ -34,14 +34,14 @@ save_existing_dns() {
   psid="$1"
 
   /usr/sbin/scutil <<EOF >/dev/null
-remove $STATE_ROOT/OldDNSSetup
+remove $STATE_ROOT/OldDNSState
 remove $STATE_ROOT
 EOF
 
-  if scutil_key_exists "Setup:/Network/Service/$psid/DNS"; then
+  if scutil_key_exists "State:/Network/Service/$psid/DNS"; then
     /usr/sbin/scutil <<EOF >/dev/null
-get Setup:/Network/Service/$psid/DNS
-set $STATE_ROOT/OldDNSSetup
+get State:/Network/Service/$psid/DNS
+set $STATE_ROOT/OldDNSState
 d.init
 d.add PrimaryService $psid
 d.add HadDNS 1
@@ -133,7 +133,7 @@ d.init
 d.add ServerAddresses * $dns_servers
 d.add SearchDomains * $search_domains
 d.add DomainName $domain_name
-set Setup:/Network/Service/$psid/DNS
+set State:/Network/Service/$psid/DNS
 EOF
 }
 

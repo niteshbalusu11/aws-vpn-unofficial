@@ -4,7 +4,7 @@ use crate::openvpn::command::{
 use crate::openvpn::management::ManagementClient;
 use crate::openvpn::parser::{ManagementEvent, parse_pushed_options};
 use crate::saml::acs::SamlAcsServer;
-use crate::saml::browser::open_browser;
+use crate::saml::browser::{BrowserOpenResult, open_browser};
 use crate::{BrowserMode, Error, Result, VpnEvent};
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc;
@@ -19,6 +19,7 @@ pub async fn drive_saml_auth(
     management: &mut ManagementClient,
     acs: &SamlAcsServer,
     browser: BrowserMode,
+    print_login_url: bool,
     event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
 ) -> Result<SamlAuthOutcome> {
     management.enable_notifications_and_release_hold().await?;
@@ -62,8 +63,17 @@ pub async fn drive_saml_auth(
 
                 tracing::info!("received SAML challenge from VPN endpoint");
                 emit(&event_tx, VpnEvent::SamlChallengeReceived);
-                open_browser(&challenge.url, browser)?;
-                emit(&event_tx, VpnEvent::BrowserOpened);
+                if print_login_url {
+                    emit(
+                        &event_tx,
+                        VpnEvent::SamlLoginUrl {
+                            url: challenge.url.to_string(),
+                        },
+                    );
+                }
+                if open_browser(&challenge.url, browser)? == BrowserOpenResult::Opened {
+                    emit(&event_tx, VpnEvent::BrowserOpened);
+                }
                 tracing::debug!("waiting for SAML assertion callback");
                 let assertion = acs.receive_once().await?;
                 tracing::debug!("received SAML assertion callback");
@@ -184,9 +194,17 @@ mod tests {
                 .unwrap();
         });
 
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
         let client_flow = tokio::spawn(async move {
-            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+            drive_saml_auth(
+                &mut management,
+                &acs,
+                BrowserMode::Disabled,
+                true,
+                Some(event_tx),
+            )
+            .await
         });
 
         post_saml_response(acs_addr, "assertion-value").await;
@@ -195,6 +213,16 @@ mod tests {
         fake_openvpn.await.unwrap();
 
         assert_eq!(outcome.vpn_ip, Some("10.0.0.10".parse().unwrap()));
+        let mut saw_login_url = false;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(10), event_rx.recv()).await
+        {
+            if matches!(event, VpnEvent::SamlLoginUrl { url } if url == "https://idp.example.com/saml")
+            {
+                saw_login_url = true;
+            }
+        }
+        assert!(saw_login_url);
     }
 
     #[tokio::test]
@@ -258,7 +286,7 @@ mod tests {
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
         let client_flow = tokio::spawn(async move {
-            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, false, None).await
         });
 
         post_saml_response(acs_addr, "assertion-value").await;
@@ -327,7 +355,7 @@ mod tests {
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
         let client_flow = tokio::spawn(async move {
-            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, false, None).await
         });
 
         post_saml_response(acs_addr, "assertion-value").await;
@@ -411,7 +439,7 @@ mod tests {
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
         let client_flow = tokio::spawn(async move {
-            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, false, None).await
         });
 
         post_saml_response(acs_addr, "assertion-value").await;
@@ -436,7 +464,7 @@ mod tests {
         });
 
         let mut management = ManagementClient::connect(management_addr).await.unwrap();
-        let err = drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None)
+        let err = drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, false, None)
             .await
             .unwrap_err();
 

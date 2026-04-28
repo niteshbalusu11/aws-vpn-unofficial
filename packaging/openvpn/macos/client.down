@@ -44,6 +44,7 @@ flush_dns_cache() {
 cleanup_state() {
   /usr/sbin/scutil <<EOF >/dev/null
 remove $STATE_ROOT/OldDNSSetup
+remove $STATE_ROOT/OldDNSState
 remove $STATE_ROOT
 EOF
 }
@@ -52,17 +53,17 @@ restore_dns() {
   psid="$1"
   had_dns="$2"
 
-  if [ "$had_dns" = "1" ] && scutil_key_exists "$STATE_ROOT/OldDNSSetup"; then
+  if [ "$had_dns" = "1" ] && scutil_key_exists "$STATE_ROOT/OldDNSState"; then
     /usr/sbin/scutil <<EOF >/dev/null
-get $STATE_ROOT/OldDNSSetup
-set Setup:/Network/Service/$psid/DNS
+get $STATE_ROOT/OldDNSState
+set State:/Network/Service/$psid/DNS
 EOF
-    log "restored previous DNS on primary service $psid"
+    log "restored previous dynamic DNS on primary service $psid"
   else
     /usr/sbin/scutil <<EOF >/dev/null
-remove Setup:/Network/Service/$psid/DNS
+remove State:/Network/Service/$psid/DNS
 EOF
-    log "removed temporary DNS on primary service $psid"
+    log "removed temporary dynamic DNS on primary service $psid"
   fi
 }
 

@@ -214,6 +214,7 @@ impl VpnClient {
             &mut management,
             &acs,
             options.browser,
+            options.print_login_url,
             Some(event_tx.clone()),
         )
         .await
@@ -269,18 +270,38 @@ impl VpnSession {
 
     pub async fn wait(&mut self) -> Result<ExitReason> {
         let result = self.openvpn.wait().await;
-        self.restore_dns()?;
+        let restore_result = self.restore_dns();
         result?;
+        restore_result?;
         Ok(ExitReason::OpenVpnExited)
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
+        let mut first_error = None;
+
         if let Some(management) = &mut self.management {
-            management.shutdown().await?;
+            if let Err(err) = management.shutdown().await {
+                first_error = Some(err);
+            }
         }
         self.management = None;
-        self.openvpn.terminate(Duration::from_secs(5)).await?;
-        self.restore_dns()?;
+
+        if let Err(err) = self.openvpn.terminate(Duration::from_secs(5)).await
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
+
+        if let Err(err) = self.restore_dns()
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
         Ok(())
     }
 

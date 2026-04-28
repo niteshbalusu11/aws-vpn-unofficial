@@ -63,6 +63,7 @@ impl OpenVpnPrepared {
         let management_password_file = workdir.path().join("management-password");
         write_secret_file(&management_password_file, &management_password)?;
         let dns_scripts = prepare_dns_scripts(&options, workdir.path())?;
+        validate_config_does_not_enable_scripts(&options.config)?;
 
         Ok(Self {
             options,
@@ -97,8 +98,6 @@ impl OpenVpnPrepared {
             "--management-query-passwords".to_string(),
             "--management-hold".to_string(),
             "--auth-nocache".to_string(),
-            "--script-security".to_string(),
-            "2".to_string(),
         ];
 
         if self.options.configure_dns {
@@ -120,6 +119,8 @@ impl OpenVpnPrepared {
             .unwrap_or_else(|| Path::new("."));
 
         vec![
+            "--script-security".to_string(),
+            "2".to_string(),
             "--setenv".to_string(),
             "TUNNELBLICK_CONFIG_FOLDER".to_string(),
             config_dir.display().to_string(),
@@ -304,6 +305,58 @@ fn prepare_dns_scripts(
     }))
 }
 
+fn validate_config_does_not_enable_scripts(config: &Path) -> Result<()> {
+    let Ok(contents) = std::fs::read_to_string(config) else {
+        return Ok(());
+    };
+
+    for line in contents.lines() {
+        let line = line.trim_start();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with(';')
+            || line.starts_with('<')
+        {
+            continue;
+        }
+
+        let directive = line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("--")
+            .trim_matches('"')
+            .trim_matches('\'');
+
+        if is_script_directive(directive) {
+            return Err(Error::InvalidConfig(format!(
+                "config contains unsupported script directive: {directive}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_script_directive(directive: &str) -> bool {
+    matches!(
+        directive,
+        "script-security"
+            | "up"
+            | "down"
+            | "ipchange"
+            | "route-up"
+            | "route-pre-down"
+            | "client-connect"
+            | "client-disconnect"
+            | "learn-address"
+            | "auth-user-pass-verify"
+            | "tls-verify"
+            | "tls-crypt-v2-verify"
+            | "plugin"
+    )
+}
+
 #[cfg(unix)]
 fn link_script(source: &Path, link: &Path) -> Result<()> {
     let source = std::fs::canonicalize(source).map_err(Error::TempFile)?;
@@ -430,7 +483,7 @@ mod tests {
 
         let config_dir = tempdir.path().join("configs");
         fs::create_dir(&config_dir).unwrap();
-        let config = config_dir.join("zbd.ovpn");
+        let config = config_dir.join("example.ovpn");
         fs::write(&config, "").unwrap();
 
         let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
@@ -455,6 +508,7 @@ mod tests {
         assert!(down_arg.ends_with("client-down"));
         assert!(!up_arg.contains(' '));
         assert!(!down_arg.contains(' '));
+        assert!(args.contains(&"--script-security".to_string()));
 
         #[cfg(unix)]
         {
@@ -476,7 +530,7 @@ mod tests {
             ]));
         assert!(
             args.windows(3)
-                .any(|window| window == ["--setenv", "CVPN_CONN_PROFILE_NAME", "zbd"])
+                .any(|window| window == ["--setenv", "CVPN_CONN_PROFILE_NAME", "example"])
         );
     }
 
@@ -535,6 +589,27 @@ mod tests {
         let args = prepared.args();
         assert!(!args.contains(&"--up".to_string()));
         assert!(!args.contains(&"--down".to_string()));
+        assert!(!args.contains(&"--script-security".to_string()));
+    }
+
+    #[test]
+    fn rejects_config_script_directives() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config = tempdir.path().join("client.ovpn");
+        fs::write(&config, "client\nup /tmp/pwn\n").unwrap();
+
+        let err = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: PathBuf::from("/bin/echo"),
+            config,
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: false,
+        })
+        .unwrap_err();
+
+        assert!(
+            matches!(err, Error::InvalidConfig(message) if message.contains("script directive"))
+        );
     }
 
     #[tokio::test]

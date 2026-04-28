@@ -254,13 +254,13 @@ mod tests {
     #[test]
     fn parses_pushed_dns_options() {
         let options = parse_pushed_options(
-            "123,,PUSH: Received control message: 'PUSH_REPLY,dhcp-option DNS 172.31.0.2,route 10.0.0.0 255.0.0.0,dhcp-option DNS 172.31.0.2'",
+            "123,,PUSH: Received control message: 'PUSH_REPLY,dhcp-option DNS 192.0.2.53,route 203.0.113.0 255.255.255.0,dhcp-option DNS 192.0.2.53'",
         )
         .unwrap();
 
         assert_eq!(
             options.dns_servers,
-            vec!["172.31.0.2".parse::<Ipv4Addr>().unwrap()]
+            vec!["192.0.2.53".parse::<Ipv4Addr>().unwrap()]
         );
     }
 

@@ -135,9 +135,9 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
                 result = session.wait() => {
                     result?;
                 }
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(Error::OpenVpnProcess)?;
-                    tracing::info!("disconnecting");
+                signal = shutdown_signal() => {
+                    let signal = signal?;
+                    tracing::info!(signal, "disconnecting");
                     session.disconnect().await?;
                 }
             }
@@ -174,6 +174,7 @@ fn print_event(event: VpnEvent) {
         VpnEvent::ManagementConnected => tracing::info!("management connected"),
         VpnEvent::AuthPromptReceived => tracing::info!("auth prompt received"),
         VpnEvent::SamlChallengeReceived => tracing::info!("saml challenge received"),
+        VpnEvent::SamlLoginUrl { url } => println!("{url}"),
         VpnEvent::BrowserOpened => tracing::info!("browser opened"),
         VpnEvent::SamlAssertionReceived => tracing::info!("saml assertion received"),
         VpnEvent::Connected { vpn_ip } => {
@@ -185,6 +186,29 @@ fn print_event(event: VpnEvent) {
         }
         _ => {}
     }
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> awsvpn::Result<&'static str> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::OpenVpnProcess)?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(Error::OpenVpnProcess)?;
+    let mut hangup = signal(SignalKind::hangup()).map_err(Error::OpenVpnProcess)?;
+
+    tokio::select! {
+        _ = interrupt.recv() => Ok("SIGINT"),
+        _ = terminate.recv() => Ok("SIGTERM"),
+        _ = hangup.recv() => Ok("SIGHUP"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> awsvpn::Result<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(Error::OpenVpnProcess)?;
+    Ok("Ctrl-C")
 }
 
 fn print_diagnostics(diagnostics: &Diagnostics) {
