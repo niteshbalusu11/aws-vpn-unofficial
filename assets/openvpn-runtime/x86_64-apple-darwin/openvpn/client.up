@@ -2,7 +2,7 @@
 set -eu
 
 STATE_ROOT="State:/Network/awsvpn"
-DEFAULT_DOMAIN="${AWSVPN_DEFAULT_DOMAIN:-openvpn}"
+DNS_SERVICE_KEY="com.amazonaws.acvc"
 
 log() {
   printf '%s\n' "awsvpn client.up: $*" >&2
@@ -12,48 +12,6 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     log "missing required command: $1"
     exit 1
-  fi
-}
-
-primary_service_id() {
-  /usr/sbin/scutil <<'EOF' | awk '/PrimaryService[[:space:]]*:/ { print $3; exit }'
-show State:/Network/Global/IPv4
-EOF
-}
-
-scutil_key_exists() {
-  key="$1"
-  output="$(/usr/sbin/scutil <<EOF 2>&1
-show $key
-EOF
-)"
-  ! printf '%s\n' "$output" | grep -q "No such key"
-}
-
-save_existing_dns() {
-  psid="$1"
-
-  /usr/sbin/scutil <<EOF >/dev/null
-remove $STATE_ROOT/OldDNSState
-remove $STATE_ROOT
-EOF
-
-  if scutil_key_exists "State:/Network/Service/$psid/DNS"; then
-    /usr/sbin/scutil <<EOF >/dev/null
-get State:/Network/Service/$psid/DNS
-set $STATE_ROOT/OldDNSState
-d.init
-d.add PrimaryService $psid
-d.add HadDNS 1
-set $STATE_ROOT
-EOF
-  else
-    /usr/sbin/scutil <<EOF >/dev/null
-d.init
-d.add PrimaryService $psid
-d.add HadDNS 0
-set $STATE_ROOT
-EOF
   fi
 }
 
@@ -76,6 +34,66 @@ add_unique_word() {
     *" $word "*) printf '%s' "$list" ;;
     *) printf '%s' "${list:+$list }$word" ;;
   esac
+}
+
+is_valid_dns_server() {
+  printf '%s\n' "$1" | awk -F. '
+    NF != 4 { exit 1 }
+    {
+      for (i = 1; i <= 4; i++) {
+        if ($i !~ /^[0-9]+$/ || $i > 255) {
+          exit 1
+        }
+      }
+    }
+  '
+}
+
+is_valid_domain() {
+  domain="$1"
+  [ -n "$domain" ] || return 1
+  [ "${#domain}" -le 253 ] || return 1
+  case "$domain" in
+    .*|*.|*..*|-*|*-) return 1 ;;
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-]*) return 1 ;;
+  esac
+
+  old_ifs="$IFS"
+  IFS=.
+  for label in $domain; do
+    [ -n "$label" ] || {
+      IFS="$old_ifs"
+      return 1
+    }
+    [ "${#label}" -le 63 ] || {
+      IFS="$old_ifs"
+      return 1
+    }
+    case "$label" in
+      -*|*-)
+        IFS="$old_ifs"
+        return 1
+        ;;
+    esac
+  done
+  IFS="$old_ifs"
+  return 0
+}
+
+validate_dns_options() {
+  for server in $dns_servers; do
+    if ! is_valid_dns_server "$server"; then
+      log "invalid pushed DNS server; refusing to modify DNS"
+      exit 1
+    fi
+  done
+
+  for domain in $search_domains; do
+    if ! is_valid_domain "$domain"; then
+      log "invalid pushed DNS search domain; refusing to modify DNS"
+      exit 1
+    fi
+  done
 }
 
 collect_openvpn_dns_options() {
@@ -114,44 +132,60 @@ collect_openvpn_dns_options() {
 
   [ -n "$dns_servers" ] || return 1
 
-  if [ -z "$domain_name" ]; then
-    domain_name="$DEFAULT_DOMAIN"
-  fi
-
-  if [ -z "$search_domains" ]; then
+  if [ -z "$search_domains" ] && [ -n "$domain_name" ]; then
     search_domains="$domain_name"
   fi
+
+  validate_dns_options
 
   export dns_servers search_domains domain_name
 }
 
 apply_dns() {
-  psid="$1"
-
-  /usr/sbin/scutil <<EOF >/dev/null
+  if [ -n "$search_domains" ]; then
+    /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
+remove $STATE_ROOT
 d.init
 d.add ServerAddresses * $dns_servers
 d.add SearchDomains * $search_domains
-d.add DomainName $domain_name
-set State:/Network/Service/$psid/DNS
+set State:/Network/Service/$DNS_SERVICE_KEY/DNS
+d.init
+d.add Active 1
+set $STATE_ROOT
+EOF
+  else
+    /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
+remove $STATE_ROOT
+d.init
+d.add ServerAddresses * $dns_servers
+set State:/Network/Service/$DNS_SERVICE_KEY/DNS
+d.init
+d.add Active 1
+set $STATE_ROOT
+EOF
+  fi
+}
+
+cleanup_dns() {
+  /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
+remove $STATE_ROOT
 EOF
 }
 
 require_command /usr/sbin/scutil
+require_command awk
+
+cleanup_dns
 
 if ! collect_openvpn_dns_options; then
   log "no pushed DNS options found; leaving DNS unchanged"
   exit 0
 fi
 
-psid="$(primary_service_id)"
-if [ -z "$psid" ]; then
-  log "could not determine primary network service"
-  exit 1
-fi
-
-save_existing_dns "$psid"
-apply_dns "$psid"
+apply_dns
 flush_dns_cache
 
-log "configured DNS servers [$dns_servers] on primary service $psid"
+log "configured VPN DNS servers [$dns_servers] as a default resolver"

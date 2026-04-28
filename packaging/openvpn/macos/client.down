@@ -2,6 +2,7 @@
 set -eu
 
 STATE_ROOT="State:/Network/awsvpn"
+DNS_SERVICE_KEY="com.amazonaws.acvc"
 
 log() {
   printf '%s\n' "awsvpn client.down: $*" >&2
@@ -12,22 +13,6 @@ require_command() {
     log "missing required command: $1"
     exit 1
   fi
-}
-
-state_value() {
-  key="$1"
-  /usr/sbin/scutil <<EOF | awk -v wanted="$key" '$1 == wanted && $2 == ":" { print $3; exit }'
-show $STATE_ROOT
-EOF
-}
-
-scutil_key_exists() {
-  key="$1"
-  output="$(/usr/sbin/scutil <<EOF 2>&1
-show $key
-EOF
-)"
-  ! printf '%s\n' "$output" | grep -q "No such key"
 }
 
 flush_dns_cache() {
@@ -43,46 +28,17 @@ flush_dns_cache() {
 
 cleanup_state() {
   /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
+remove State:/Network/Service/$DNS_SERVICE_KEY/SMB
 remove $STATE_ROOT/OldDNSSetup
 remove $STATE_ROOT/OldDNSState
 remove $STATE_ROOT
 EOF
 }
 
-restore_dns() {
-  psid="$1"
-  had_dns="$2"
-
-  if [ "$had_dns" = "1" ] && scutil_key_exists "$STATE_ROOT/OldDNSState"; then
-    /usr/sbin/scutil <<EOF >/dev/null
-get $STATE_ROOT/OldDNSState
-set State:/Network/Service/$psid/DNS
-EOF
-    log "restored previous dynamic DNS on primary service $psid"
-  else
-    /usr/sbin/scutil <<EOF >/dev/null
-remove State:/Network/Service/$psid/DNS
-EOF
-    log "removed temporary dynamic DNS on primary service $psid"
-  fi
-}
-
 require_command /usr/sbin/scutil
 
-if ! scutil_key_exists "$STATE_ROOT"; then
-  log "no saved DNS state found; leaving DNS unchanged"
-  exit 0
-fi
-
-psid="$(state_value PrimaryService)"
-had_dns="$(state_value HadDNS)"
-
-if [ -z "$psid" ]; then
-  cleanup_state
-  log "saved DNS state had no primary service; leaving DNS unchanged"
-  exit 0
-fi
-
-restore_dns "$psid" "${had_dns:-0}"
 cleanup_state
 flush_dns_cache
+
+log "removed temporary VPN DNS resolver"

@@ -1,12 +1,23 @@
 use crate::{Error, Result};
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(target_os = "macos")]
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(target_os = "macos")]
+use std::thread::{self, JoinHandle};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct NativeDnsGuard {
     #[cfg(target_os = "macos")]
-    macos_active: bool,
+    macos: Option<MacosDnsGuard>,
     #[cfg(target_os = "linux")]
     linux: Option<LinuxDnsGuard>,
 }
@@ -25,6 +36,10 @@ impl Drop for NativeDnsGuard {
 
 #[cfg(target_os = "macos")]
 const MACOS_DNS_SERVICE_KEY: &str = "com.amazonaws.acvc";
+#[cfg(target_os = "macos")]
+const MACOS_STATE_ROOT: &str = "State:/Network/awsvpn";
+#[cfg(target_os = "macos")]
+const MACOS_LOCAL_DNS: &str = "127.0.0.1";
 
 pub fn configure_native_dns(
     servers: &[Ipv4Addr],
@@ -42,23 +57,22 @@ fn configure_native_dns_impl(
         return Ok(None);
     }
 
-    let server_values = servers
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let commands = format!(
-        "\
-d.init
-d.add ServerAddresses * {server_values}
-d.add SearchDomains * openvpn
-d.add DomainName openvpn
-set State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
-"
-    );
+    restore_macos_system_dns()?;
 
-    run_scutil(&commands)?;
-    Ok(Some(NativeDnsGuard { macos_active: true }))
+    let proxy = DnsProxyGuard::start(servers)?;
+    let primary_service = macos_primary_service_id()?;
+    let had_dns =
+        macos_scutil_key_exists(&format!("State:/Network/Service/{primary_service}/DNS"))?;
+
+    if let Err(err) = run_scutil(&render_macos_dns_setup(&primary_service, had_dns)) {
+        drop(proxy);
+        return Err(err);
+    }
+    flush_macos_dns_cache();
+
+    Ok(Some(NativeDnsGuard {
+        macos: Some(MacosDnsGuard { proxy }),
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -101,20 +115,14 @@ fn restore_native_dns(guard: &mut NativeDnsGuard) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn restore_native_dns_impl(guard: &mut NativeDnsGuard) -> Result<()> {
-    if !guard.macos_active {
+    let Some(macos) = guard.macos.take() else {
         return Ok(());
-    }
+    };
 
-    let commands = format!(
-        "\
-remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
-remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
-"
-    );
+    let restore_result = restore_macos_system_dns();
+    drop(macos);
 
-    run_scutil(&commands)?;
-    guard.macos_active = false;
-    Ok(())
+    restore_result
 }
 
 #[cfg(target_os = "linux")]
@@ -131,11 +139,402 @@ fn restore_native_dns_impl(_guard: &mut NativeDnsGuard) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacosDnsGuard {
+    proxy: DnsProxyGuard,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacosDnsGuard {
+    fn drop(&mut self) {
+        self.proxy.stop();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct DnsProxyGuard {
+    shutdown: Arc<AtomicBool>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl DnsProxyGuard {
+    fn start(servers: &[Ipv4Addr]) -> Result<Self> {
+        let upstreams = Arc::new(
+            servers
+                .iter()
+                .map(|server| SocketAddr::from((*server, 53)))
+                .collect::<Vec<_>>(),
+        );
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let udp_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 53)).map_err(|err| {
+            Error::DnsConfigurationFailed(format!(
+                "could not bind local DNS UDP proxy on {MACOS_LOCAL_DNS}:53: {err}"
+            ))
+        })?;
+        udp_socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .map_err(|err| Error::DnsConfigurationFailed(format!("local DNS UDP proxy: {err}")))?;
+
+        let tcp_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 53)).map_err(|err| {
+            Error::DnsConfigurationFailed(format!(
+                "could not bind local DNS TCP proxy on {MACOS_LOCAL_DNS}:53: {err}"
+            ))
+        })?;
+        tcp_listener
+            .set_nonblocking(true)
+            .map_err(|err| Error::DnsConfigurationFailed(format!("local DNS TCP proxy: {err}")))?;
+
+        let udp_shutdown = shutdown.clone();
+        let udp_upstreams = upstreams.clone();
+        let udp_handle =
+            thread::spawn(move || udp_proxy_loop(udp_socket, udp_upstreams, udp_shutdown));
+
+        let tcp_shutdown = shutdown.clone();
+        let tcp_handle =
+            thread::spawn(move || tcp_proxy_loop(tcp_listener, upstreams, tcp_shutdown));
+
+        Ok(Self {
+            shutdown,
+            handles: vec![udp_handle, tcp_handle],
+        })
+    }
+
+    fn stop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.send_to(&[], (Ipv4Addr::LOCALHOST, 53)));
+        let _ = TcpStream::connect_timeout(
+            &SocketAddr::from((Ipv4Addr::LOCALHOST, 53)),
+            Duration::from_millis(100),
+        );
+
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for DnsProxyGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn udp_proxy_loop(socket: UdpSocket, upstreams: Arc<Vec<SocketAddr>>, shutdown: Arc<AtomicBool>) {
+    let mut buffer = [0_u8; 4096];
+    while !shutdown.load(Ordering::Relaxed) {
+        match socket.recv_from(&mut buffer) {
+            Ok((0, _)) => {}
+            Ok((len, client)) => {
+                if let Some(response) = forward_dns_udp(&buffer[..len], &upstreams) {
+                    let _ = socket.send_to(&response, client);
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tcp_proxy_loop(
+    listener: TcpListener,
+    upstreams: Arc<Vec<SocketAddr>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let upstreams = upstreams.clone();
+                thread::spawn(move || {
+                    let _ = handle_dns_tcp_client(stream, &upstreams);
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn forward_dns_udp(query: &[u8], upstreams: &[SocketAddr]) -> Option<Vec<u8>> {
+    for upstream in upstreams {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .ok()?;
+        if socket.send_to(query, upstream).is_err() {
+            continue;
+        }
+
+        let mut response = [0_u8; 4096];
+        if let Ok((len, _)) = socket.recv_from(&mut response) {
+            return Some(response[..len].to_vec());
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn handle_dns_tcp_client(mut client: TcpStream, upstreams: &[SocketAddr]) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    client.set_write_timeout(Some(Duration::from_secs(2)))?;
+
+    let mut length = [0_u8; 2];
+    client.read_exact(&mut length)?;
+    let query_len = u16::from_be_bytes(length) as usize;
+    if query_len == 0 {
+        return Ok(());
+    }
+
+    let mut query = vec![0_u8; query_len];
+    client.read_exact(&mut query)?;
+
+    if let Some(response) = forward_dns_tcp(&query, upstreams) {
+        client.write_all(&(response.len() as u16).to_be_bytes())?;
+        client.write_all(&response)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn forward_dns_tcp(query: &[u8], upstreams: &[SocketAddr]) -> Option<Vec<u8>> {
+    use std::io::{Read, Write};
+
+    for upstream in upstreams {
+        let Ok(mut stream) = TcpStream::connect_timeout(upstream, Duration::from_secs(2)) else {
+            continue;
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .ok()?;
+        if stream
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .and_then(|_| stream.write_all(query))
+            .is_err()
+        {
+            continue;
+        }
+
+        let mut length = [0_u8; 2];
+        if stream.read_exact(&mut length).is_err() {
+            continue;
+        }
+        let response_len = u16::from_be_bytes(length) as usize;
+        if response_len == 0 {
+            continue;
+        }
+        let mut response = vec![0_u8; response_len];
+        if stream.read_exact(&mut response).is_ok() {
+            return Some(response);
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_primary_service_id() -> Result<String> {
+    let output = run_scutil_capture("show State:/Network/Global/IPv4\n")?;
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() == 3 && fields[0] == "PrimaryService" && fields[1] == ":" {
+            let value = fields[2].to_string();
+            if value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(Error::DnsConfigurationFailed(
+        "could not determine macOS primary network service".to_string(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_scutil_key_exists(key: &str) -> Result<bool> {
+    let output = run_scutil_capture(&format!("show {key}\n"))?;
+    Ok(!output.contains("No such key"))
+}
+
+#[cfg(target_os = "macos")]
+fn render_macos_dns_setup(primary_service: &str, had_dns: bool) -> String {
+    let primary_dns_key = format!("State:/Network/Service/{primary_service}/DNS");
+    let mut commands = format!(
+        "\
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
+remove {MACOS_STATE_ROOT}/OldDNSState
+remove {MACOS_STATE_ROOT}
+"
+    );
+
+    if had_dns {
+        commands.push_str(&format!(
+            "\
+get {primary_dns_key}
+set {MACOS_STATE_ROOT}/OldDNSState
+"
+        ));
+    }
+
+    commands.push_str(&format!(
+        "\
+d.init
+d.add ServerAddresses * {MACOS_LOCAL_DNS}
+set {primary_dns_key}
+d.init
+d.add PrimaryService {primary_service}
+d.add HadDNS {}
+set {MACOS_STATE_ROOT}
+",
+        if had_dns { 1 } else { 0 }
+    ));
+
+    commands
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_system_dns() -> Result<()> {
+    let state_key_exists = macos_scutil_key_exists(MACOS_STATE_ROOT)?;
+    if !state_key_exists {
+        let commands = format!(
+            "\
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
+"
+        );
+        run_scutil(&commands)?;
+        flush_macos_dns_cache();
+        return Ok(());
+    }
+
+    let state = run_scutil_capture(&format!("show {MACOS_STATE_ROOT}\n"))?;
+    let primary_service = scutil_state_value(&state, "PrimaryService");
+    let had_dns = scutil_state_value(&state, "HadDNS").as_deref() == Some("1");
+
+    let Some(primary_service) = primary_service else {
+        let commands = render_macos_dns_cleanup(None, false);
+        run_scutil(&commands)?;
+        flush_macos_dns_cache();
+        return Ok(());
+    };
+
+    let commands = render_macos_dns_cleanup(Some(&primary_service), had_dns);
+    run_scutil(&commands)?;
+    flush_macos_dns_cache();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn render_macos_dns_cleanup(primary_service: Option<&str>, had_dns: bool) -> String {
+    let mut commands = String::new();
+    if let Some(primary_service) = primary_service {
+        let primary_dns_key = format!("State:/Network/Service/{primary_service}/DNS");
+        if had_dns {
+            commands.push_str(&format!(
+                "\
+get {MACOS_STATE_ROOT}/OldDNSState
+set {primary_dns_key}
+"
+            ));
+        } else {
+            commands.push_str(&format!("remove {primary_dns_key}\n"));
+        }
+    }
+
+    commands.push_str(&format!(
+        "\
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
+remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
+remove {MACOS_STATE_ROOT}/OldDNSState
+remove {MACOS_STATE_ROOT}
+"
+    ));
+    commands
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_state_value(output: &str, key: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        (fields.len() == 3 && fields[0] == key && fields[1] == ":").then(|| fields[2].to_string())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn flush_macos_dns_cache() {
+    let _ = std::process::Command::new("dscacheutil")
+        .arg("-flushcache")
+        .output();
+    let _ = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .output();
+    let _ = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponderHelper"])
+        .output();
+}
+
+#[cfg(target_os = "macos")]
+fn run_scutil_capture(commands: &str) -> Result<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("scutil")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| Error::DnsConfigurationFailed(err.to_string()))?;
+
+    child
+        .stdin
+        .as_mut()
+        .expect("scutil stdin is piped")
+        .write_all(commands.as_bytes())
+        .map_err(|err| Error::DnsConfigurationFailed(err.to_string()))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| Error::DnsConfigurationFailed(err.to_string()))?;
+
+    if !output.status.success() {
+        return Err(Error::DnsConfigurationFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    let mut contents = String::from_utf8_lossy(&output.stdout).into_owned();
+    contents.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(contents)
+}
+
+#[cfg(target_os = "macos")]
 fn run_scutil(commands: &str) -> Result<()> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    let mut child = Command::new("scutil")
+    let mut child = std::process::Command::new("scutil")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -186,7 +186,8 @@ impl VpnClient {
             config: options.config_path.clone(),
             management_host: options.management_host,
             management_port: options.management_port,
-            configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault),
+            configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault)
+                && !cfg!(target_os = "macos"),
         })?;
         let openvpn_configures_dns = prepared.uses_dns_scripts();
 

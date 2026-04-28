@@ -57,22 +57,27 @@ struct ConnectArgs {
     )]
     config: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, help = "Override the bundled AWS-patched OpenVPN binary")]
     openvpn: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, help = "Print verbose, redacted startup logs")]
     debug: bool,
 
-    #[arg(long)]
+    #[arg(long, help = "Do not open the SAML login URL in a browser")]
     no_browser: bool,
 
-    #[arg(long, value_parser = parse_browser)]
+    #[arg(long, value_parser = parse_browser, help = "Open the SAML login URL in a specific browser")]
     browser: Option<webbrowser::Browser>,
 
-    #[arg(long)]
+    #[arg(long, help = "Print the SAML login URL to stdout")]
     print_login_url: bool,
 
-    #[arg(long, default_value = "openvpn", value_parser = parse_dns_mode)]
+    #[arg(
+        long,
+        default_value = "openvpn",
+        value_parser = parse_dns_mode,
+        help = "DNS mode: openvpn or disabled"
+    )]
     dns: DnsMode,
 }
 
