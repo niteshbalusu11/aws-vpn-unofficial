@@ -12,8 +12,17 @@ pub fn open_browser(url: &Url, mode: BrowserMode) -> Result<BrowserOpenResult> {
         return Ok(BrowserOpenResult::Disabled);
     }
 
-    tracing::info!("opening SAML login URL in default browser");
-    webbrowser::open(url.as_str()).map_err(Error::BrowserLaunchFailed)?;
+    match mode {
+        BrowserMode::System => {
+            tracing::info!("opening SAML login URL in default browser");
+            webbrowser::open(url.as_str()).map_err(Error::BrowserLaunchFailed)?;
+        }
+        BrowserMode::Specific(browser) => {
+            tracing::info!(?browser, "opening SAML login URL in requested browser");
+            webbrowser::open_browser(browser, url.as_str()).map_err(Error::BrowserLaunchFailed)?;
+        }
+        BrowserMode::Disabled => unreachable!("disabled browser mode returned before opening"),
+    }
 
     Ok(BrowserOpenResult::Opened)
 }

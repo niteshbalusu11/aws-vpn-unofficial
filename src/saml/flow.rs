@@ -1,4 +1,6 @@
-use crate::openvpn::command::{acs_password, auth_username, saml_response_password};
+use crate::openvpn::command::{
+    ManagementCommand, acs_password, auth_username, saml_response_password,
+};
 use crate::openvpn::management::ManagementClient;
 use crate::openvpn::parser::ManagementEvent;
 use crate::saml::acs::SamlAcsServer;
@@ -21,8 +23,8 @@ pub async fn drive_saml_auth(
     management.enable_notifications_and_release_hold().await?;
 
     let acs_port = acs.local_addr()?.port();
-    let mut pending_state_id = None::<String>;
-    let mut pending_assertion = None::<String>;
+    let mut active_state_id = None::<String>;
+    let mut saml_response = None::<String>;
 
     loop {
         let Some(event) = management.read_event().await? else {
@@ -32,13 +34,30 @@ pub async fn drive_saml_auth(
         };
 
         match event {
-            ManagementEvent::AuthPrompt if pending_state_id.is_none() => {
-                tracing::debug!("received initial OpenVPN auth prompt");
+            ManagementEvent::AuthPrompt => {
                 emit(&event_tx, VpnEvent::AuthPromptReceived);
-                management.send(&auth_username()).await?;
-                management.send(&acs_password(acs_port)).await?;
+                match (&active_state_id, &saml_response) {
+                    (Some(state_id), Some(response)) => {
+                        tracing::debug!(
+                            "received repeated OpenVPN auth prompt; replaying SAML response"
+                        );
+                        send_saml_response(management, state_id, response).await?;
+                    }
+                    _ => {
+                        tracing::debug!("received initial OpenVPN auth prompt");
+                        management.send(&auth_username()).await?;
+                        management.send(&acs_password(acs_port)).await?;
+                    }
+                }
             }
             ManagementEvent::SamlChallenge(challenge) => {
+                if active_state_id.as_deref() == Some(challenge.state_id.as_str())
+                    && saml_response.is_some()
+                {
+                    tracing::debug!("ignoring duplicate SAML challenge after response was sent");
+                    continue;
+                }
+
                 tracing::info!("received SAML challenge from VPN endpoint");
                 emit(&event_tx, VpnEvent::SamlChallengeReceived);
                 open_browser(&challenge.url, browser)?;
@@ -47,26 +66,11 @@ pub async fn drive_saml_auth(
                 let assertion = acs.receive_once().await?;
                 tracing::debug!("received SAML assertion callback");
                 emit(&event_tx, VpnEvent::SamlAssertionReceived);
-                pending_state_id = Some(challenge.state_id);
-                pending_assertion = Some(assertion.expose_for_openvpn().to_string());
-            }
-            ManagementEvent::AuthPrompt => {
-                tracing::debug!("received final OpenVPN auth prompt; sending SAML assertion");
-                let state_id = pending_state_id.take().ok_or_else(|| {
-                    Error::ManagementProtocol(
-                        "received second auth prompt before CRV1 challenge".to_string(),
-                    )
-                })?;
-                let assertion = pending_assertion.take().ok_or_else(|| {
-                    Error::ManagementProtocol(
-                        "received second auth prompt before SAML assertion".to_string(),
-                    )
-                })?;
-
-                management.send(&auth_username()).await?;
-                management
-                    .send(&saml_response_password(&state_id, &assertion))
-                    .await?;
+                tracing::debug!("sending SAML assertion response to OpenVPN");
+                let response = assertion.expose_for_openvpn().to_string();
+                send_saml_response(management, &challenge.state_id, &response).await?;
+                active_state_id = Some(challenge.state_id);
+                saml_response = Some(response);
             }
             ManagementEvent::Connected { vpn_ip } => {
                 tracing::info!(?vpn_ip, "VPN connected");
@@ -76,10 +80,11 @@ pub async fn drive_saml_auth(
             ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
             ManagementEvent::Reconnecting { reason } => {
                 if reason.as_deref() == Some("auth-failure") {
-                    if pending_state_id.is_some() || pending_assertion.is_some() {
+                    if active_state_id.is_some() {
                         tracing::debug!(
-                            "ignoring auth-failure reconnect while SAML response is pending"
+                            "releasing management hold after auth-failure reconnect during SAML flow"
                         );
+                        management.send(&ManagementCommand::HoldRelease).await?;
                         continue;
                     }
                     return Err(Error::AuthFailed("auth-failure".to_string()));
@@ -88,6 +93,17 @@ pub async fn drive_saml_auth(
             ManagementEvent::Log(_) | ManagementEvent::Ignored => {}
         }
     }
+}
+
+async fn send_saml_response(
+    management: &mut ManagementClient,
+    state_id: &str,
+    saml_response: &str,
+) -> Result<()> {
+    management.send(&auth_username()).await?;
+    management
+        .send(&saml_response_password(state_id, saml_response))
+        .await
 }
 
 fn emit(event_tx: &Option<mpsc::UnboundedSender<VpnEvent>>, event: VpnEvent) {
@@ -143,11 +159,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            stream
-                .get_mut()
-                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
-                .await
-                .unwrap();
             expect_line(&mut stream, "username \"Auth\" N/A").await;
             expect_line(
                 &mut stream,
@@ -213,17 +224,166 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                "password \"Auth\" CRV1::state123::assertion-value",
+            )
+            .await;
+
             stream
                 .get_mut()
                 .write_all(b">STATE:1,RECONNECTING,auth-failure,,,,,\n")
                 .await
                 .unwrap();
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:123,CONNECTED,SUCCESS,10.0.0.10,1.2.3.4,443,,\n")
+                .await
+                .unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let client_flow = tokio::spawn(async move {
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+        });
+
+        post_saml_response(acs_addr, "assertion-value").await;
+
+        let outcome = client_flow.await.unwrap().unwrap();
+        fake_openvpn.await.unwrap();
+
+        assert_eq!(outcome.vpn_ip, Some("10.0.0.10".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn ignores_duplicate_saml_challenge_after_assertion_callback() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let acs_addr = acs.local_addr().unwrap();
+
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+
+        let fake_openvpn = tokio::spawn(async move {
+            let (stream, _) = management_listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+
+            expect_line(&mut stream, "state on").await;
+            expect_line(&mut stream, "log on").await;
+            expect_line(&mut stream, "echo on").await;
+            expect_line(&mut stream, "hold release").await;
+
             stream
                 .get_mut()
                 .write_all(b">PASSWORD:Need 'Auth' username/password\n")
                 .await
                 .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                &format!("password \"Auth\" ACS::{}", acs_addr.port()),
+            )
+            .await;
 
+            let challenge =
+                b">LOG:1,,AUTH: Received control message: AUTH_FAILED,CRV1:R:state123:b'Ti9B':https://idp.example.com/saml\n";
+            stream.get_mut().write_all(challenge).await.unwrap();
+            stream.get_mut().write_all(challenge).await.unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                "password \"Auth\" CRV1::state123::assertion-value",
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:1,RECONNECTING,auth-failure,,,,,\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:123,CONNECTED,SUCCESS,10.0.0.10,1.2.3.4,443,,\n")
+                .await
+                .unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let client_flow = tokio::spawn(async move {
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+        });
+
+        post_saml_response(acs_addr, "assertion-value").await;
+
+        let outcome = client_flow.await.unwrap().unwrap();
+        fake_openvpn.await.unwrap();
+
+        assert_eq!(outcome.vpn_ip, Some("10.0.0.10".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn replays_saml_response_when_openvpn_prompts_after_reconnect() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let acs_addr = acs.local_addr().unwrap();
+
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+
+        let fake_openvpn = tokio::spawn(async move {
+            let (stream, _) = management_listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+
+            expect_line(&mut stream, "state on").await;
+            expect_line(&mut stream, "log on").await;
+            expect_line(&mut stream, "echo on").await;
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                &format!("password \"Auth\" ACS::{}", acs_addr.port()),
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(
+                    b">PASSWORD:Verification Failed: 'Auth' ['CRV1:R:state123:b'Ti9B':https://idp.example.com/saml']\n",
+                )
+                .await
+                .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                "password \"Auth\" CRV1::state123::assertion-value",
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:1,RECONNECTING,auth-failure,,,,,\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
             expect_line(&mut stream, "username \"Auth\" N/A").await;
             expect_line(
                 &mut stream,

@@ -23,6 +23,7 @@ pub struct OpenVpnLaunchOptions {
     pub config: PathBuf,
     pub management_host: IpAddr,
     pub management_port: Option<u16>,
+    pub configure_dns: bool,
 }
 
 #[derive(Debug)]
@@ -32,6 +33,13 @@ pub struct OpenVpnPrepared {
     management_password: String,
     management_password_file: PathBuf,
     management_addr: SocketAddr,
+    dns_scripts: Option<DnsScripts>,
+}
+
+#[derive(Debug)]
+struct DnsScripts {
+    up: PathBuf,
+    down: PathBuf,
 }
 
 impl OpenVpnPrepared {
@@ -54,6 +62,7 @@ impl OpenVpnPrepared {
         let management_password = generate_management_password();
         let management_password_file = workdir.path().join("management-password");
         write_secret_file(&management_password_file, &management_password)?;
+        let dns_scripts = prepare_dns_scripts(&options, workdir.path())?;
 
         Ok(Self {
             options,
@@ -61,6 +70,7 @@ impl OpenVpnPrepared {
             management_password,
             management_password_file,
             management_addr,
+            dns_scripts,
         })
     }
 
@@ -73,7 +83,7 @@ impl OpenVpnPrepared {
     }
 
     pub fn args(&self) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "--config".to_string(),
             self.options.config.display().to_string(),
             "--management".to_string(),
@@ -85,6 +95,42 @@ impl OpenVpnPrepared {
             "--auth-nocache".to_string(),
             "--script-security".to_string(),
             "2".to_string(),
+        ];
+
+        if self.options.configure_dns {
+            args.extend(self.dns_script_args());
+        }
+
+        args
+    }
+
+    fn dns_script_args(&self) -> Vec<String> {
+        let Some(dns_scripts) = &self.dns_scripts else {
+            return Vec::new();
+        };
+
+        let config_dir = self
+            .options
+            .config
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+
+        vec![
+            "--setenv".to_string(),
+            "TUNNELBLICK_CONFIG_FOLDER".to_string(),
+            config_dir.display().to_string(),
+            "--setenv".to_string(),
+            "CVPN_CONN_PROFILE_NAME".to_string(),
+            self.options
+                .config
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("awsvpn")
+                .to_string(),
+            "--up".to_string(),
+            dns_scripts.up.display().to_string(),
+            "--down".to_string(),
+            dns_scripts.down.display().to_string(),
         ]
     }
 
@@ -225,6 +271,47 @@ fn write_secret_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn prepare_dns_scripts(
+    options: &OpenVpnLaunchOptions,
+    workdir: &Path,
+) -> Result<Option<DnsScripts>> {
+    if !options.configure_dns {
+        return Ok(None);
+    }
+
+    let Some(openvpn_dir) = options.binary.parent() else {
+        return Ok(None);
+    };
+    let up_script = openvpn_dir.join("client.up");
+    let down_script = openvpn_dir.join("client.down");
+
+    if !up_script.is_file() || !down_script.is_file() {
+        return Ok(None);
+    }
+
+    let up_link = workdir.join("client-up");
+    let down_link = workdir.join("client-down");
+    link_script(&up_script, &up_link)?;
+    link_script(&down_script, &down_link)?;
+
+    Ok(Some(DnsScripts {
+        up: up_link,
+        down: down_link,
+    }))
+}
+
+#[cfg(unix)]
+fn link_script(source: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(source, link).map_err(Error::TempFile)
+}
+
+#[cfg(not(unix))]
+fn link_script(source: &Path, link: &Path) -> Result<()> {
+    std::fs::copy(source, link)
+        .map(|_| ())
+        .map_err(Error::TempFile)
+}
+
 fn spawn_log_reader<R>(
     source: &'static str,
     reader: R,
@@ -281,6 +368,7 @@ mod tests {
             config: PathBuf::from("/tmp/client.ovpn"),
             management_host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             management_port: Some(47000),
+            configure_dns: true,
         })
         .unwrap_err();
 
@@ -294,6 +382,7 @@ mod tests {
             config: PathBuf::from("/tmp/client.ovpn"),
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
+            configure_dns: true,
         })
         .unwrap();
 
@@ -321,6 +410,88 @@ mod tests {
         assert!(args.contains(&"--management-hold".to_string()));
     }
 
+    #[test]
+    fn adds_aws_macos_dns_scripts_when_present() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let openvpn_dir = tempdir.path().join("openvpn");
+        fs::create_dir(&openvpn_dir).unwrap();
+        let binary = openvpn_dir.join("acvc-openvpn");
+        let up_script = openvpn_dir.join("client.up");
+        let down_script = openvpn_dir.join("client.down");
+        fs::write(&binary, "").unwrap();
+        fs::write(&up_script, "").unwrap();
+        fs::write(&down_script, "").unwrap();
+
+        let config_dir = tempdir.path().join("configs");
+        fs::create_dir(&config_dir).unwrap();
+        let config = config_dir.join("zbd.ovpn");
+        fs::write(&config, "").unwrap();
+
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary,
+            config: config.clone(),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: true,
+        })
+        .unwrap();
+
+        let args = prepared.args();
+        let up_arg = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--up").then_some(pair[1].as_str()))
+            .unwrap();
+        let down_arg = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--down").then_some(pair[1].as_str()))
+            .unwrap();
+        assert!(up_arg.ends_with("client-up"));
+        assert!(down_arg.ends_with("client-down"));
+        assert!(!up_arg.contains(' '));
+        assert!(!down_arg.contains(' '));
+
+        #[cfg(unix)]
+        {
+            assert_eq!(fs::read_link(up_arg).unwrap(), up_script);
+            assert_eq!(fs::read_link(down_arg).unwrap(), down_script);
+        }
+
+        assert!(args.windows(3).any(|window| window
+            == [
+                "--setenv",
+                "TUNNELBLICK_CONFIG_FOLDER",
+                config.parent().unwrap().to_str().unwrap()
+            ]));
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["--setenv", "CVPN_CONN_PROFILE_NAME", "zbd"])
+        );
+    }
+
+    #[test]
+    fn skips_dns_scripts_when_disabled() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let openvpn_dir = tempdir.path().join("openvpn");
+        fs::create_dir(&openvpn_dir).unwrap();
+        let binary = openvpn_dir.join("acvc-openvpn");
+        fs::write(&binary, "").unwrap();
+        fs::write(openvpn_dir.join("client.up"), "").unwrap();
+        fs::write(openvpn_dir.join("client.down"), "").unwrap();
+
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary,
+            config: PathBuf::from("/tmp/client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: false,
+        })
+        .unwrap();
+
+        let args = prepared.args();
+        assert!(!args.contains(&"--up".to_string()));
+        assert!(!args.contains(&"--down".to_string()));
+    }
+
     #[tokio::test]
     async fn streams_redacted_openvpn_output() {
         let script = "printf 'password \"Auth\" CRV1::state::secret\\n'; printf 'SAMLResponse=secret&x=y\\n' >&2";
@@ -329,6 +500,7 @@ mod tests {
             config: PathBuf::from("/tmp/client.ovpn"),
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47001),
+            configure_dns: true,
         })
         .unwrap();
 

@@ -49,17 +49,24 @@ impl SamlAcsServer {
     }
 
     async fn receive_once_inner(&self) -> Result<SamlAssertion> {
-        let (mut stream, _) = self.listener.accept().await.map_err(Error::AcsServer)?;
+        loop {
+            let (mut stream, _) = self.listener.accept().await.map_err(Error::AcsServer)?;
 
-        match read_saml_assertion(&mut stream).await {
-            Ok(assertion) => {
-                write_response(&mut stream, 200, "OK", SUCCESS_HTML).await?;
-                Ok(assertion)
-            }
-            Err(err) => {
-                let (status, reason, body) = response_for_error(&err);
-                let _ = write_response(&mut stream, status, reason, body).await;
-                Err(err)
+            match read_saml_assertion(&mut stream).await {
+                Ok(assertion) => {
+                    write_response(&mut stream, 200, "OK", SUCCESS_HTML).await?;
+                    return Ok(assertion);
+                }
+                Err(err) if should_continue_after_error(&err) => {
+                    let (status, reason, body) = response_for_error(&err);
+                    let _ = write_response(&mut stream, status, reason, body).await;
+                    continue;
+                }
+                Err(err) => {
+                    let (status, reason, body) = response_for_error(&err);
+                    let _ = write_response(&mut stream, status, reason, body).await;
+                    return Err(err);
+                }
             }
         }
     }
@@ -261,16 +268,29 @@ fn response_for_error(err: &Error) -> (u16, &'static str, &'static str) {
         Error::SamlResponseTooLarge => (413, "Payload Too Large", FAILURE_HTML),
         Error::SamlResponseMissing => (400, "Bad Request", FAILURE_HTML),
         Error::InvalidConfig(message) if message.contains("must use POST") => {
-            (405, "Method Not Allowed", FAILURE_HTML)
+            (200, "OK", WAITING_HTML)
+        }
+        Error::InvalidConfig(message) if message.contains("path must be /") => {
+            (404, "Not Found", WAITING_HTML)
         }
         _ => (400, "Bad Request", FAILURE_HTML),
     }
+}
+
+fn should_continue_after_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::InvalidConfig(message)
+            if message.contains("must use POST") || message.contains("path must be /")
+    )
 }
 
 const SUCCESS_HTML: &str =
     "<!doctype html><html><body>SAML login received. You can close this window.</body></html>";
 const FAILURE_HTML: &str =
     "<!doctype html><html><body>SAML login could not be completed.</body></html>";
+const WAITING_HTML: &str =
+    "<!doctype html><html><body>Waiting for SAML login response.</body></html>";
 
 #[cfg(test)]
 mod tests {
@@ -344,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_wrong_method() {
+    async fn ignores_get_before_valid_post() {
         let server = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
             .await
             .unwrap();
@@ -357,14 +377,20 @@ mod tests {
             .await
             .unwrap();
         let response = read_response(&mut stream).await.unwrap();
-        let err = server_task.await.unwrap().unwrap_err();
 
-        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
-        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+
+        let response = post_form(addr, "/", "SAMLResponse=assertion")
+            .await
+            .unwrap();
+        let assertion = server_task.await.unwrap().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(assertion.expose_for_openvpn(), "assertion");
     }
 
     #[tokio::test]
-    async fn rejects_wrong_path() {
+    async fn ignores_wrong_path_before_valid_post() {
         let server = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
             .await
             .unwrap();
@@ -374,10 +400,16 @@ mod tests {
         let response = post_form(addr, "/callback", "SAMLResponse=assertion")
             .await
             .unwrap();
-        let err = server_task.await.unwrap().unwrap_err();
 
-        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
-        assert!(matches!(err, Error::InvalidConfig(_)));
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+
+        let response = post_form(addr, "/", "SAMLResponse=assertion")
+            .await
+            .unwrap();
+        let assertion = server_task.await.unwrap().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(assertion.expose_for_openvpn(), "assertion");
     }
 
     #[tokio::test]

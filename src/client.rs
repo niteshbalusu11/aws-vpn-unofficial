@@ -13,6 +13,7 @@ use tokio::time;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
     System,
+    Specific(webbrowser::Browser),
     Disabled,
 }
 
@@ -79,6 +80,11 @@ impl ConnectOptions {
 
     pub fn with_print_login_url(mut self, print_login_url: bool) -> Self {
         self.print_login_url = print_login_url;
+        self
+    }
+
+    pub fn with_dns_mode(mut self, dns_mode: DnsMode) -> Self {
+        self.dns_mode = dns_mode;
         self
     }
 
@@ -175,6 +181,7 @@ impl VpnClient {
             config: options.config_path.clone(),
             management_host: options.management_host,
             management_port: options.management_port,
+            configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault),
         })?;
 
         let (internal_event_tx, event_rx) = mpsc::unbounded_channel();

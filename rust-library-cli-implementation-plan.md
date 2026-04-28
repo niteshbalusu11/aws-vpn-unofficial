@@ -590,14 +590,14 @@ OpenVPN args for MVP:
 
 ### DNS and Routing
 
-- [ ] For MVP, let OpenVPN manage routes.
-- [ ] Document DNS limitations clearly.
+- [x] For MVP, let OpenVPN manage routes.
+- [x] Document DNS limitations clearly.
 - [ ] Add Linux `systemd-resolved` support.
 - [ ] Add Linux `resolvconf` support.
 - [ ] Add NixOS-specific notes or mode.
-- [ ] Add macOS DNS setup via scripts or direct `scutil`.
-- [ ] Ensure disconnect restores DNS.
-- [ ] Add `DnsMode` enum to public options before exposing behavior.
+- [x] Add macOS DNS setup via scripts or direct `scutil`.
+- [x] Ensure disconnect restores DNS.
+- [x] Add `DnsMode` enum to public options before exposing behavior.
 
 ### Logging and Redaction
 
@@ -787,7 +787,7 @@ TODO:
 
 - [ ] Build AWS-patched OpenVPN for darwin-amd64.
 - [ ] Build AWS-patched OpenVPN for darwin-arm64.
-- [ ] Implement macOS DNS setup.
+- [x] Implement macOS DNS setup via AWS `client.up` / `client.down` scripts when using the installed AWS OpenVPN bundle.
 - [ ] Define privilege story.
 - [ ] Test Intel Mac.
 - [ ] Test Apple Silicon.
