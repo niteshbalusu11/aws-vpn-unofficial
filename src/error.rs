@@ -17,8 +17,32 @@ pub enum Error {
     #[error("management protocol error: {0}")]
     ManagementProtocol(String),
 
+    #[error("could not connect to OpenVPN management socket: {0}")]
+    ManagementConnectFailed(std::io::Error),
+
+    #[error("OpenVPN management socket failed: {0}")]
+    ManagementIo(std::io::Error),
+
     #[error("invalid SAML URL: {0}")]
     InvalidSamlUrl(String),
+
+    #[error("could not bind SAML callback server: {0}")]
+    AcsBindFailed(std::io::Error),
+
+    #[error("SAML callback server failed: {0}")]
+    AcsServer(std::io::Error),
+
+    #[error("SAML login timed out")]
+    SamlTimeout,
+
+    #[error("SAML response was missing")]
+    SamlResponseMissing,
+
+    #[error("SAML response exceeded 128 KiB limit")]
+    SamlResponseTooLarge,
+
+    #[error("could not open browser: {0}")]
+    BrowserLaunchFailed(std::io::Error),
 
     #[error("VPN authentication failed: {0}")]
     AuthFailed(String),

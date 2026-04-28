@@ -1,0 +1,191 @@
+use crate::openvpn::command::{acs_password, auth_username, saml_response_password};
+use crate::openvpn::management::ManagementClient;
+use crate::openvpn::parser::ManagementEvent;
+use crate::saml::acs::SamlAcsServer;
+use crate::saml::browser::open_browser;
+use crate::{BrowserMode, Error, Result};
+use std::net::IpAddr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamlAuthOutcome {
+    pub vpn_ip: Option<IpAddr>,
+}
+
+pub async fn drive_saml_auth(
+    management: &mut ManagementClient,
+    acs: &SamlAcsServer,
+    browser: BrowserMode,
+) -> Result<SamlAuthOutcome> {
+    management.enable_notifications_and_release_hold().await?;
+
+    let acs_port = acs.local_addr()?.port();
+    let mut pending_state_id = None::<String>;
+    let mut pending_assertion = None::<String>;
+
+    loop {
+        let Some(event) = management.read_event().await? else {
+            return Err(Error::ManagementProtocol(
+                "management socket closed before VPN connected".to_string(),
+            ));
+        };
+
+        match event {
+            ManagementEvent::AuthPrompt if pending_state_id.is_none() => {
+                management.send(&auth_username()).await?;
+                management.send(&acs_password(acs_port)).await?;
+            }
+            ManagementEvent::SamlChallenge(challenge) => {
+                open_browser(&challenge.url, browser)?;
+                let assertion = acs.receive_once().await?;
+                pending_state_id = Some(challenge.state_id);
+                pending_assertion = Some(assertion.expose_for_openvpn().to_string());
+            }
+            ManagementEvent::AuthPrompt => {
+                let state_id = pending_state_id.take().ok_or_else(|| {
+                    Error::ManagementProtocol(
+                        "received second auth prompt before CRV1 challenge".to_string(),
+                    )
+                })?;
+                let assertion = pending_assertion.take().ok_or_else(|| {
+                    Error::ManagementProtocol(
+                        "received second auth prompt before SAML assertion".to_string(),
+                    )
+                })?;
+
+                management.send(&auth_username()).await?;
+                management
+                    .send(&saml_response_password(&state_id, &assertion))
+                    .await?;
+            }
+            ManagementEvent::Connected { vpn_ip } => {
+                return Ok(SamlAuthOutcome { vpn_ip });
+            }
+            ManagementEvent::AuthFailed(message) => return Err(Error::AuthFailed(message)),
+            ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
+            ManagementEvent::Reconnecting { reason } => {
+                if reason.as_deref() == Some("auth-failure") {
+                    return Err(Error::AuthFailed("auth-failure".to_string()));
+                }
+            }
+            ManagementEvent::Log(_) | ManagementEvent::Ignored => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::saml::acs::SamlAcsServer;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn drives_complete_saml_management_flow() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let acs_addr = acs.local_addr().unwrap();
+
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+
+        let fake_openvpn = tokio::spawn(async move {
+            let (stream, _) = management_listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+
+            expect_line(&mut stream, "state on").await;
+            expect_line(&mut stream, "log on").await;
+            expect_line(&mut stream, "echo on").await;
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                &format!("password \"Auth\" ACS::{}", acs_addr.port()),
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(
+                    b">PASSWORD:Verification Failed: 'Auth' ['CRV1:R:state123:b'Ti9B':https://idp.example.com/saml']\n",
+                )
+                .await
+                .unwrap();
+
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                "password \"Auth\" CRV1::state123::assertion-value",
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:123,CONNECTED,SUCCESS,10.0.0.10,1.2.3.4,443,,\n")
+                .await
+                .unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let client_flow = tokio::spawn(async move {
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled).await
+        });
+
+        post_saml_response(acs_addr, "assertion-value").await;
+
+        let outcome = client_flow.await.unwrap().unwrap();
+        fake_openvpn.await.unwrap();
+
+        assert_eq!(outcome.vpn_ip, Some("10.0.0.10".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn maps_fatal_management_event_to_error() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+
+        let fake_openvpn = tokio::spawn(async move {
+            let (mut stream, _) = management_listener.accept().await.unwrap();
+            stream.write_all(b">FATAL:bad tun\n").await.unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let err = drive_saml_auth(&mut management, &acs, BrowserMode::Disabled)
+            .await
+            .unwrap_err();
+
+        fake_openvpn.await.unwrap();
+        assert!(matches!(err, Error::FatalOpenVpn(message) if message == "bad tun"));
+    }
+
+    async fn expect_line(reader: &mut BufReader<TcpStream>, expected: &str) {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim_end(), expected);
+    }
+
+    async fn post_saml_response(addr: std::net::SocketAddr, assertion: &str) {
+        let body = format!("SAMLResponse={assertion}");
+        let request = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+    }
+}

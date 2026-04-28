@@ -9,6 +9,7 @@ mod error;
 mod event;
 pub mod logredact;
 pub mod openvpn;
+pub mod saml;
 
 pub use client::{BrowserMode, ConnectOptions, DnsMode, LogLevel, VpnClient, VpnSession};
 pub use error::{Error, Result};
