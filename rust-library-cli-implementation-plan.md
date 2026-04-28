@@ -598,6 +598,8 @@ OpenVPN args for MVP:
 - [x] Add macOS DNS setup via scripts or direct `scutil`.
 - [x] Ensure disconnect restores DNS.
 - [x] Add `DnsMode` enum to public options before exposing behavior.
+- [x] Add reusable route/DNS diagnostics API.
+- [x] Add `awsvpn diagnose` CLI command.
 
 ### Logging and Redaction
 
@@ -788,7 +790,7 @@ TODO:
 - [ ] Build AWS-patched OpenVPN for darwin-amd64.
 - [ ] Build AWS-patched OpenVPN for darwin-arm64.
 - [x] Implement macOS DNS setup via AWS `client.up` / `client.down` scripts when using the installed AWS OpenVPN bundle.
-- [ ] Define privilege story.
+- [x] Define current privilege story in README: macOS connect requires `sudo` when OpenVPN configures `utun`, routes, and DNS scripts.
 - [ ] Test Intel Mac.
 - [ ] Test Apple Silicon.
 

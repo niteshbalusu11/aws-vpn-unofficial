@@ -5,6 +5,7 @@
 
 mod client;
 pub mod config;
+pub mod diagnose;
 mod error;
 mod event;
 pub mod logredact;
@@ -12,5 +13,6 @@ pub mod openvpn;
 pub mod saml;
 
 pub use client::{BrowserMode, ConnectOptions, DnsMode, LogLevel, VpnClient, VpnSession};
+pub use diagnose::{Diagnostics, RouteEntry, collect_diagnostics};
 pub use error::{Error, Result};
 pub use event::{ExitReason, VpnEvent};

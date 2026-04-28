@@ -1,4 +1,7 @@
-use awsvpn::{BrowserMode, ConnectOptions, DnsMode, Error, LogLevel, VpnClient, VpnEvent};
+use awsvpn::{
+    BrowserMode, ConnectOptions, Diagnostics, DnsMode, Error, LogLevel, VpnClient, VpnEvent,
+    collect_diagnostics,
+};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -34,6 +37,7 @@ enum Command {
         #[arg(long, default_value = "openvpn", value_parser = parse_dns_mode)]
         dns: DnsMode,
     },
+    Diagnose,
 }
 
 #[tokio::main]
@@ -67,6 +71,7 @@ impl Cli {
     fn debug_enabled(&self) -> bool {
         match &self.command {
             Command::Connect { debug, .. } => *debug,
+            Command::Diagnose => false,
         }
     }
 }
@@ -140,6 +145,11 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
             log_task.abort();
             Ok(())
         }
+        Command::Diagnose => {
+            let diagnostics = collect_diagnostics()?;
+            print_diagnostics(&diagnostics);
+            Ok(())
+        }
     }
 }
 
@@ -175,4 +185,49 @@ fn print_event(event: VpnEvent) {
         }
         _ => {}
     }
+}
+
+fn print_diagnostics(diagnostics: &Diagnostics) {
+    println!("DNS servers: {}", format_dns_servers(diagnostics));
+    println!("VPN DNS present: {}", yes_no(diagnostics.vpn_dns_present));
+    println!("utun routes: {}", diagnostics.routes.len());
+    println!(
+        "VPN routes present: {}",
+        yes_no(diagnostics.vpn_routes_present)
+    );
+    println!(
+        "AWS up log present: {}",
+        yes_no(diagnostics.aws_up_log_exists)
+    );
+    println!(
+        "AWS down log present: {}",
+        yes_no(diagnostics.aws_down_log_exists)
+    );
+
+    if !diagnostics.routes.is_empty() {
+        println!("Sample VPN routes:");
+        for route in diagnostics.routes.iter().take(8) {
+            println!(
+                "  {} via {} dev {}",
+                route.destination, route.gateway, route.interface
+            );
+        }
+    }
+}
+
+fn format_dns_servers(diagnostics: &Diagnostics) -> String {
+    if diagnostics.dns_servers.is_empty() {
+        return "none".to_string();
+    }
+
+    diagnostics
+        .dns_servers
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }

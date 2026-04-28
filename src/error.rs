@@ -59,6 +59,9 @@ pub enum Error {
     #[error("OpenVPN fatal error: {0}")]
     FatalOpenVpn(String),
 
+    #[error("diagnostic command failed: {0}")]
+    DiagnosticFailed(String),
+
     #[error("operation was interrupted")]
     Interrupted,
 }
