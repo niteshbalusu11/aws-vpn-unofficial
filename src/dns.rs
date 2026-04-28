@@ -251,14 +251,28 @@ fn configure_resolvconf(
 fn restore_linux_dns(guard: LinuxDnsGuard) -> Result<()> {
     match guard.method {
         LinuxDnsMethod::SystemdResolved { interface } => {
-            run_command_status("resolvectl", &["revert".to_string(), interface])
-                .map_err(Error::DnsConfigurationFailed)
+            match run_command_status("resolvectl", &["revert".to_string(), interface.clone()]) {
+                Ok(()) => Ok(()),
+                Err(err) if is_resolvectl_missing_interface_error(&err) => {
+                    tracing::debug!(
+                        interface,
+                        "systemd-resolved link state was already gone during DNS restore"
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(Error::DnsConfigurationFailed(err)),
+            }
         }
         LinuxDnsMethod::Resolvconf { key } => {
             run_command_status("resolvconf", &["-d".to_string(), key])
                 .map_err(Error::DnsConfigurationFailed)
         }
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_resolvectl_missing_interface_error(message: &str) -> bool {
+    message.contains("Failed to resolve interface") && message.contains("No such device")
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -406,5 +420,12 @@ mod tests {
             config,
             "search openvpn\nnameserver 192.0.2.53\nnameserver 198.51.100.53\n"
         );
+    }
+
+    #[test]
+    fn treats_missing_systemd_resolved_interface_as_already_restored() {
+        let error = r#"resolvectl exited with status exit status: 1: Failed to resolve interface "tun0": No such device"#;
+
+        assert!(is_resolvectl_missing_interface_error(error));
     }
 }
