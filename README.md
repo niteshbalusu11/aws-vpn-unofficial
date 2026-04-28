@@ -1,6 +1,11 @@
-# awsvpn
+# AWS VPN Unofficial
 
 Unofficial Rust library and CLI for AWS Client VPN SAML profiles.
+
+This is not an official Amazon Web Services project. It is not affiliated with,
+endorsed by, maintained by, or supported by AWS. Use it at your own risk; you are
+responsible for reviewing the code, complying with your organization's security
+policies, and validating that it is appropriate for your environment.
 
 The crate is library-first. The `awsvpn` binary is a thin wrapper over public
 types such as `VpnClient`, `ConnectOptions`, and `collect_diagnostics`.
@@ -40,8 +45,8 @@ By default, the CLI uses `--dns openvpn`. When the bundled runtime contains
 to OpenVPN so helper scripts can install pushed DNS and restore it on
 disconnect. When those scripts are not present, the CLI captures pushed DNS
 from OpenVPN and installs a temporary native macOS DNS resolver with `scutil`.
-On other platforms this fallback currently fails explicitly instead of silently
-leaving DNS unconfigured.
+On Linux, the native fallback uses `systemd-resolved` through `resolvectl` when
+available, then falls back to `resolvconf`.
 
 Use `--dns disabled` to skip those scripts. User-provided OpenVPN configs with
 script or plugin directives are rejected because this CLI is commonly run with
