@@ -1,0 +1,14 @@
+//! Reusable AWS Client VPN orchestration library.
+//!
+//! The crate is intentionally library-first. The `awsvpn` binary should remain
+//! a thin adapter over these public types.
+
+mod client;
+mod error;
+mod event;
+pub mod logredact;
+pub mod openvpn;
+
+pub use client::{BrowserMode, ConnectOptions, DnsMode, LogLevel, VpnClient, VpnSession};
+pub use error::{Error, Result};
+pub use event::{ExitReason, VpnEvent};
