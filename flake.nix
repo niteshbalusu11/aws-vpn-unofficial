@@ -59,7 +59,7 @@
             libcap_ng
             libnl
             nettools
-            resolvconf
+            openresolv
             systemd
           ]);
 
@@ -83,28 +83,27 @@
             shellHook = ''
               export AWSVPN_OPENVPN_SOURCE_URL="https://amazon-source-code-downloads.s3.amazonaws.com/aws/clientvpn/openvpn-2.6.12-aws-1.tar.gz"
               export PATH="${shellPath}:$PATH"
-
-              if [ "$(uname -s)" = "Darwin" ]; then
-                nix_sdk="${pkgs.apple-sdk_14}"
-                sdkroot="''${SDKROOT:-}"
-                if [ -z "$sdkroot" ] || [ ! -d "$sdkroot" ]; then
-                  sdkroot="$(find "$nix_sdk/Platforms/MacOSX.platform/Developer/SDKs" -maxdepth 1 -name 'MacOSX*.sdk' | sort | tail -n 1)"
-                fi
-                deployment_target="''${MACOSX_DEPLOYMENT_TARGET:-14.0}"
-                export DEVELOPER_DIR="$nix_sdk"
-                export SDKROOT="$sdkroot"
-                export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
-                export CMAKE_OSX_SYSROOT="$sdkroot"
-                export CMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target"
-                export CC="${pkgs.stdenv.cc}/bin/cc"
-                export CXX="${pkgs.stdenv.cc}/bin/c++"
-                export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${pkgs.stdenv.cc}/bin/cc"
-                export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="${pkgs.stdenv.cc}/bin/cc"
-                export CFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CFLAGS:+ $CFLAGS}"
-                export CXXFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CXXFLAGS:+ $CXXFLAGS}"
-                export LDFLAGS="-L$sdkroot/usr/lib -L${pkgs.libiconv}/lib -Wl,-macosx_version_min,$deployment_target''${LDFLAGS:+ $LDFLAGS}"
-                export RUSTFLAGS="-L native=$sdkroot/usr/lib -L native=${pkgs.libiconv}/lib -C link-arg=-mmacosx-version-min=$deployment_target''${RUSTFLAGS:+ $RUSTFLAGS}"
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+              nix_sdk="${pkgs.apple-sdk_14}"
+              sdkroot="''${SDKROOT:-}"
+              if [ -z "$sdkroot" ] || [ ! -d "$sdkroot" ]; then
+                sdkroot="$(find "$nix_sdk/Platforms/MacOSX.platform/Developer/SDKs" -maxdepth 1 -name 'MacOSX*.sdk' | sort | tail -n 1)"
               fi
+              deployment_target="''${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+              export DEVELOPER_DIR="$nix_sdk"
+              export SDKROOT="$sdkroot"
+              export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
+              export CMAKE_OSX_SYSROOT="$sdkroot"
+              export CMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target"
+              export CC="${pkgs.stdenv.cc}/bin/cc"
+              export CXX="${pkgs.stdenv.cc}/bin/c++"
+              export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="${pkgs.stdenv.cc}/bin/cc"
+              export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="${pkgs.stdenv.cc}/bin/cc"
+              export CFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CFLAGS:+ $CFLAGS}"
+              export CXXFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CXXFLAGS:+ $CXXFLAGS}"
+              export LDFLAGS="-L$sdkroot/usr/lib -L${pkgs.libiconv}/lib -Wl,-macosx_version_min,$deployment_target''${LDFLAGS:+ $LDFLAGS}"
+              export RUSTFLAGS="-L native=$sdkroot/usr/lib -L native=${pkgs.libiconv}/lib -C link-arg=-mmacosx-version-min=$deployment_target''${RUSTFLAGS:+ $RUSTFLAGS}"
             '';
           };
         }
