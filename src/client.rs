@@ -1,3 +1,4 @@
+use crate::config::OvpnConfigSummary;
 use crate::{Error, ExitReason, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -83,6 +84,19 @@ impl ConnectOptions {
                 "expected a file path, got {}",
                 self.config_path.display()
             )));
+        }
+
+        let summary = OvpnConfigSummary::parse_file(&self.config_path)?;
+        if summary.remotes.is_empty() {
+            return Err(Error::InvalidConfig(
+                "config does not contain a remote directive".to_string(),
+            ));
+        }
+
+        if !summary.supports_saml_auth_flow() {
+            return Err(Error::InvalidConfig(
+                "config must contain auth-user-pass or auth-federate".to_string(),
+            ));
         }
 
         if let Some(openvpn_binary) = &self.openvpn_binary {

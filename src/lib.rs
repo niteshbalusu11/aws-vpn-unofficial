@@ -4,6 +4,7 @@
 //! a thin adapter over these public types.
 
 mod client;
+pub mod config;
 mod error;
 mod event;
 pub mod logredact;
