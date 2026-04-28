@@ -58,6 +58,12 @@ This rebuilds the AWS-patched OpenVPN runtime for the current target and stages
 it under `assets/openvpn-runtime/<target>/openvpn`, which Cargo embeds into the
 single `awsvpn` binary at compile time.
 
+To refresh all committed runtime assets, run the manual GitHub Actions workflow
+`Build OpenVPN Runtime Assets`. It builds OpenVPN for each supported target and
+uploads `runtime-<target>` artifacts. Download those artifacts, copy each
+`openvpn/` directory into `assets/openvpn-runtime/<target>/openvpn/`, validate,
+and commit the result.
+
 After a connection reaches `vpn connected`, `awsvpn diagnose` should report the
 pushed VPN DNS server.
 
@@ -80,9 +86,9 @@ GitHub Actions builds native self-contained binaries for:
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
 
-Each CI job builds the AWS-patched OpenVPN runtime for that target, stages it
-under `assets/openvpn-runtime/<target>/openvpn`, and then compiles `awsvpn` with
-that runtime embedded.
+Each CI job builds `awsvpn` with the runtime from the committed
+`assets/openvpn-runtime/<target>/openvpn` directory embedded in the binary. The
+regular CI workflow does not rebuild OpenVPN on every push.
 
 ## Licensing
 
