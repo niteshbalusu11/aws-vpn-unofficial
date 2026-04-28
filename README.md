@@ -12,15 +12,21 @@ types such as `VpnClient`, `ConnectOptions`, and `collect_diagnostics`.
 
 ## Install
 
-From a published crate:
+From a GitHub release, download the `awsvpn` binary for your platform, place it
+somewhere on your `PATH`, and run:
 
 ```bash
-cargo install aws-vpn-unofficial
 sudo awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example
 ```
 
-From a release artifact, place the downloaded `awsvpn` binary somewhere on your
-`PATH` and run the same command.
+To build from source:
+
+```bash
+git clone https://github.com/niteshbalusu11/aws-vpn-unofficial.git
+cd aws-vpn-unofficial
+cargo install --path .
+sudo awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example
+```
 
 ## Connect with the Bundled Runtime
 
