@@ -6,6 +6,7 @@
 mod client;
 pub mod config;
 pub mod diagnose;
+mod dns;
 mod error;
 mod event;
 pub mod logredact;

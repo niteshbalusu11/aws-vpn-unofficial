@@ -62,6 +62,9 @@ pub enum Error {
     #[error("diagnostic command failed: {0}")]
     DiagnosticFailed(String),
 
+    #[error("DNS configuration failed: {0}")]
+    DnsConfigurationFailed(String),
+
     #[error("operation was interrupted")]
     Interrupted,
 }

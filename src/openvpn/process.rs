@@ -82,6 +82,10 @@ impl OpenVpnPrepared {
         &self.management_password
     }
 
+    pub fn uses_dns_scripts(&self) -> bool {
+        self.dns_scripts.is_some()
+    }
+
     pub fn args(&self) -> Vec<String> {
         let mut args = vec![
             "--config".to_string(),
@@ -302,11 +306,13 @@ fn prepare_dns_scripts(
 
 #[cfg(unix)]
 fn link_script(source: &Path, link: &Path) -> Result<()> {
+    let source = std::fs::canonicalize(source).map_err(Error::TempFile)?;
     std::os::unix::fs::symlink(source, link).map_err(Error::TempFile)
 }
 
 #[cfg(not(unix))]
 fn link_script(source: &Path, link: &Path) -> Result<()> {
+    let source = std::fs::canonicalize(source).map_err(Error::TempFile)?;
     std::fs::copy(source, link)
         .map(|_| ())
         .map_err(Error::TempFile)
@@ -452,8 +458,14 @@ mod tests {
 
         #[cfg(unix)]
         {
-            assert_eq!(fs::read_link(up_arg).unwrap(), up_script);
-            assert_eq!(fs::read_link(down_arg).unwrap(), down_script);
+            assert_eq!(
+                fs::read_link(up_arg).unwrap(),
+                fs::canonicalize(up_script).unwrap()
+            );
+            assert_eq!(
+                fs::read_link(down_arg).unwrap(),
+                fs::canonicalize(down_script).unwrap()
+            );
         }
 
         assert!(args.windows(3).any(|window| window
@@ -466,6 +478,39 @@ mod tests {
             args.windows(3)
                 .any(|window| window == ["--setenv", "CVPN_CONN_PROFILE_NAME", "zbd"])
         );
+    }
+
+    #[test]
+    fn dns_script_symlinks_resolve_relative_openvpn_path() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let openvpn_dir = tempdir.path().join("openvpn");
+        fs::create_dir(&openvpn_dir).unwrap();
+        fs::write(openvpn_dir.join("acvc-openvpn"), "").unwrap();
+        fs::write(openvpn_dir.join("client.up"), "").unwrap();
+        fs::write(openvpn_dir.join("client.down"), "").unwrap();
+
+        let previous_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tempdir.path()).unwrap();
+
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: PathBuf::from("openvpn/acvc-openvpn"),
+            config: PathBuf::from("client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: true,
+        })
+        .unwrap();
+
+        std::env::set_current_dir(previous_dir).unwrap();
+
+        let args = prepared.args();
+        let up_arg = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--up").then_some(pair[1].as_str()))
+            .unwrap();
+
+        #[cfg(unix)]
+        assert!(fs::read_link(up_arg).unwrap().is_absolute());
     }
 
     #[test]

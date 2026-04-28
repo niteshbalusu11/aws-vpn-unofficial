@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use url::Url;
 
 const AUTH_PROMPT: &str = ">PASSWORD:Need 'Auth' username/password";
@@ -25,6 +25,11 @@ pub enum ManagementEvent {
 pub struct SamlChallenge {
     pub state_id: String,
     pub url: Url,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushedOptions {
+    pub dns_servers: Vec<Ipv4Addr>,
 }
 
 pub fn parse_management_line(line: &str) -> Result<ManagementEvent> {
@@ -117,6 +122,36 @@ pub fn validate_saml_url(raw_url: &str) -> Result<Url> {
     }
 
     Ok(url)
+}
+
+pub fn parse_pushed_options(line: &str) -> Option<PushedOptions> {
+    let start = line.find("PUSH_REPLY,")?;
+    let payload = &line[start + "PUSH_REPLY,".len()..];
+    let payload = payload.trim_end_matches('\'');
+    let mut dns_servers = Vec::new();
+
+    for option in payload.split(',').map(str::trim) {
+        let Some(rest) = option.strip_prefix("dhcp-option ") else {
+            continue;
+        };
+
+        let mut parts = rest.split_whitespace();
+        if parts.next() != Some("DNS") {
+            continue;
+        }
+
+        let Some(raw_addr) = parts.next() else {
+            continue;
+        };
+
+        if let Ok(addr) = raw_addr.parse::<Ipv4Addr>() {
+            if !dns_servers.contains(&addr) {
+                dns_servers.push(addr);
+            }
+        }
+    }
+
+    (!dns_servers.is_empty()).then_some(PushedOptions { dns_servers })
 }
 
 fn parse_state(line: &str) -> Option<ManagementEvent> {
@@ -213,6 +248,19 @@ mod tests {
             ManagementEvent::Connected {
                 vpn_ip: Some("10.0.0.10".parse().unwrap())
             }
+        );
+    }
+
+    #[test]
+    fn parses_pushed_dns_options() {
+        let options = parse_pushed_options(
+            "123,,PUSH: Received control message: 'PUSH_REPLY,dhcp-option DNS 172.31.0.2,route 10.0.0.0 255.0.0.0,dhcp-option DNS 172.31.0.2'",
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.dns_servers,
+            vec!["172.31.0.2".parse::<Ipv4Addr>().unwrap()]
         );
     }
 

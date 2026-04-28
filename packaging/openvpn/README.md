@@ -23,8 +23,15 @@ that OpenSSL and stages this runtime layout:
 target/openvpn-runtime/<target>/openvpn/
   acvc-openvpn
   openssl.cnf
+  client.up       # macOS only
+  client.down     # macOS only
   README.runtime.txt
 ```
+
+The macOS `client.up` and `client.down` scripts are original minimal helpers
+for applying OpenVPN-pushed DNS to the active primary network service and
+restoring it on disconnect. They are intentionally not copied from the AWS
+Client VPN/Tunnelblick GPL scripts.
 
 ## Build
 
@@ -32,6 +39,12 @@ Native build:
 
 ```bash
 packaging/openvpn/build-openvpn.sh
+```
+
+Nix-backed native build:
+
+```bash
+nix develop -c packaging/openvpn/build-openvpn.sh
 ```
 
 Target override:

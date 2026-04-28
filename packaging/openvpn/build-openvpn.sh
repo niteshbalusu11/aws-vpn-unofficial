@@ -216,6 +216,8 @@ stage_runtime() {
   mkdir -p "$DIST_DIR"
   cp "$openvpn_bin" "$DIST_DIR/acvc-openvpn"
   cp "$OPENSSL_BUILD_DIR/apps/openssl.cnf" "$DIST_DIR/openssl.cnf"
+  stage_platform_helpers
+  rewrite_macos_system_libraries "$DIST_DIR/acvc-openvpn"
 
   cat > "$DIST_DIR/README.runtime.txt" <<EOF
 This runtime was built from AWS's patched OpenVPN source tarball.
@@ -224,6 +226,32 @@ Source: $SOURCE_URL
 Source SHA256: $SOURCE_SHA256
 Target: $TARGET
 EOF
+}
+
+stage_platform_helpers() {
+  if [[ "$TARGET" != *apple-darwin* ]]; then
+    return
+  fi
+
+  cp "$SCRIPT_DIR/macos/client.up" "$DIST_DIR/client.up"
+  cp "$SCRIPT_DIR/macos/client.down" "$DIST_DIR/client.down"
+  chmod 0755 "$DIST_DIR/client.up" "$DIST_DIR/client.down"
+}
+
+rewrite_macos_system_libraries() {
+  local binary="$1"
+  if [[ "$TARGET" != *apple-darwin* ]]; then
+    return
+  fi
+
+  require_tool otool
+  require_tool install_name_tool
+
+  local resolver_path
+  resolver_path="$(otool -L "$binary" | awk '/libresolv.*\.dylib/ { print $1; exit }')"
+  if [[ -n "$resolver_path" && "$resolver_path" != /usr/lib/libresolv.9.dylib ]]; then
+    install_name_tool -change "$resolver_path" /usr/lib/libresolv.9.dylib "$binary"
+  fi
 }
 
 main "$@"

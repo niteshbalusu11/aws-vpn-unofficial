@@ -2,16 +2,17 @@ use crate::openvpn::command::{
     ManagementCommand, acs_password, auth_username, saml_response_password,
 };
 use crate::openvpn::management::ManagementClient;
-use crate::openvpn::parser::ManagementEvent;
+use crate::openvpn::parser::{ManagementEvent, parse_pushed_options};
 use crate::saml::acs::SamlAcsServer;
 use crate::saml::browser::open_browser;
 use crate::{BrowserMode, Error, Result, VpnEvent};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SamlAuthOutcome {
     pub vpn_ip: Option<IpAddr>,
+    pub dns_servers: Vec<Ipv4Addr>,
 }
 
 pub async fn drive_saml_auth(
@@ -25,6 +26,7 @@ pub async fn drive_saml_auth(
     let acs_port = acs.local_addr()?.port();
     let mut active_state_id = None::<String>;
     let mut saml_response = None::<String>;
+    let mut dns_servers = Vec::<Ipv4Addr>::new();
 
     loop {
         let Some(event) = management.read_event().await? else {
@@ -74,7 +76,10 @@ pub async fn drive_saml_auth(
             }
             ManagementEvent::Connected { vpn_ip } => {
                 tracing::info!(?vpn_ip, "VPN connected");
-                return Ok(SamlAuthOutcome { vpn_ip });
+                return Ok(SamlAuthOutcome {
+                    vpn_ip,
+                    dns_servers,
+                });
             }
             ManagementEvent::AuthFailed(message) => return Err(Error::AuthFailed(message)),
             ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
@@ -90,7 +95,13 @@ pub async fn drive_saml_auth(
                     return Err(Error::AuthFailed("auth-failure".to_string()));
                 }
             }
-            ManagementEvent::Log(_) | ManagementEvent::Ignored => {}
+            ManagementEvent::Log(message) => {
+                if let Some(options) = parse_pushed_options(&message) {
+                    tracing::debug!(dns_servers = ?options.dns_servers, "captured pushed DNS options");
+                    dns_servers = options.dns_servers;
+                }
+            }
+            ManagementEvent::Ignored => {}
         }
     }
 }

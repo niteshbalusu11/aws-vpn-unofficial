@@ -1,4 +1,5 @@
 use crate::config::OvpnConfigSummary;
+use crate::dns::{NativeDnsGuard, configure_native_dns};
 use crate::openvpn::management::ManagementClient;
 use crate::openvpn::process::{OpenVpnLaunchOptions, OpenVpnPrepared, OpenVpnProcess};
 use crate::saml::acs::SamlAcsServer;
@@ -183,6 +184,7 @@ impl VpnClient {
             management_port: options.management_port,
             configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault),
         })?;
+        let openvpn_configures_dns = prepared.uses_dns_scripts();
 
         let (internal_event_tx, event_rx) = mpsc::unbounded_channel();
         let event_tx = options.event_tx.clone().unwrap_or(internal_event_tx);
@@ -223,6 +225,18 @@ impl VpnClient {
                 return Err(err);
             }
         };
+        let dns_guard =
+            if matches!(options.dns_mode, DnsMode::OpenVpnDefault) && !openvpn_configures_dns {
+                if outcome.dns_servers.is_empty() {
+                    tracing::warn!("VPN endpoint did not push DNS servers");
+                    None
+                } else {
+                    tracing::info!(dns_servers = ?outcome.dns_servers, "configuring native DNS");
+                    configure_native_dns(&outcome.dns_servers)?
+                }
+            } else {
+                None
+            };
         let _ = event_tx.send(VpnEvent::Connected {
             vpn_ip: outcome.vpn_ip,
         });
@@ -231,6 +245,7 @@ impl VpnClient {
             openvpn,
             management: Some(management),
             event_rx: options.event_tx.is_none().then_some(event_rx),
+            dns_guard,
         })
     }
 }
@@ -240,6 +255,7 @@ pub struct VpnSession {
     openvpn: OpenVpnProcess,
     management: Option<ManagementClient>,
     event_rx: Option<mpsc::UnboundedReceiver<VpnEvent>>,
+    dns_guard: Option<NativeDnsGuard>,
 }
 
 impl VpnSession {
@@ -252,7 +268,9 @@ impl VpnSession {
     }
 
     pub async fn wait(&mut self) -> Result<ExitReason> {
-        self.openvpn.wait().await?;
+        let result = self.openvpn.wait().await;
+        self.restore_dns()?;
+        result?;
         Ok(ExitReason::OpenVpnExited)
     }
 
@@ -262,6 +280,15 @@ impl VpnSession {
         }
         self.management = None;
         self.openvpn.terminate(Duration::from_secs(5)).await?;
+        self.restore_dns()?;
+        Ok(())
+    }
+
+    fn restore_dns(&mut self) -> Result<()> {
+        if let Some(mut dns_guard) = self.dns_guard.take() {
+            tracing::info!("restoring native DNS");
+            dns_guard.restore()?;
+        }
         Ok(())
     }
 }

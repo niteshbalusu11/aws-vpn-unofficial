@@ -7,17 +7,39 @@ types such as `VpnClient`, `ConnectOptions`, and `collect_diagnostics`.
 
 ## Connect on macOS with the AWS OpenVPN Bundle
 
+Build as your normal user, then run only the built binary with `sudo`.
+Do not use `sudo cargo run`: Cargo will compile as root, which loses the Nix
+SDK/linker environment and can fail to find the macOS SDK or `libiconv`.
+
 ```bash
-sudo cargo run -- connect ~/.config/AWSVPNClient/OpenVpnConfigs/zbd \
+cargo build
+
+sudo -E target/debug/awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/zbd \
   --openvpn "/Applications/AWS VPN Client/AWS VPN Client.app/Contents/Resources/openvpn/acvc-openvpn" \
   --debug
 ```
 
 By default, the CLI uses `--dns openvpn`. When `client.up` and `client.down`
 exist next to `acvc-openvpn`, the launcher passes temporary no-space symlinks
-to OpenVPN so AWS's scripts can install pushed DNS and restore it on disconnect.
+to OpenVPN so helper scripts can install pushed DNS and restore it on disconnect.
+When those scripts are not present, the CLI captures pushed DNS from OpenVPN
+and installs a temporary native macOS DNS resolver with `scutil`.
 
 Use `--dns disabled` to skip those scripts.
+
+## Connect on macOS with the Self-Built OpenVPN Runtime
+
+```bash
+nix develop -c packaging/openvpn/build-openvpn.sh
+cargo build
+
+sudo -E target/debug/awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/zbd \
+  --openvpn target/openvpn-runtime/aarch64-apple-darwin/openvpn/acvc-openvpn \
+  --debug
+```
+
+After the connection reaches `vpn connected`, `awsvpn diagnose` should report
+the pushed VPN DNS server, for example `172.31.0.2`.
 
 ## Diagnose
 
