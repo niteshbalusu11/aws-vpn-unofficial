@@ -16,7 +16,9 @@ From a GitHub release, download the `awsvpn` binary for your platform, place it
 somewhere on your `PATH`, and run:
 
 ```bash
-sudo awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example
+mkdir -p ~/.awsvpnunofficial
+cp ~/.config/AWSVPNClient/OpenVpnConfigs/example ~/.awsvpnunofficial/vpnconfig.ovpn
+sudo awsvpn connect
 ```
 
 To build from source:
@@ -25,7 +27,7 @@ To build from source:
 git clone https://github.com/niteshbalusu11/aws-vpn-unofficial.git
 cd aws-vpn-unofficial
 cargo install --path .
-sudo awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example
+sudo awsvpn connect
 ```
 
 ## Connect with the Bundled Runtime
@@ -37,9 +39,12 @@ SDK/linker environment and can fail to find the macOS SDK or `libiconv`.
 ```bash
 cargo build
 
-sudo -E target/debug/awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example \
-  --debug
+sudo -E target/debug/awsvpn connect --debug
 ```
+
+When no config path is passed, `connect` reads
+`~/.awsvpnunofficial/vpnconfig.ovpn`. When run through `sudo`, the `~` resolves
+to the invoking desktop user, not root.
 
 By default, the CLI uses the AWS-patched OpenVPN runtime embedded in the Rust
 binary. It extracts that runtime to a private temporary directory for the life

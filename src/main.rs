@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::Level;
 
+const DEFAULT_CONFIG_RELATIVE_PATH: &str = ".awsvpnunofficial/vpnconfig.ovpn";
+
 #[derive(Debug, Parser)]
 #[command(name = "awsvpn", version, about = "Unofficial AWS Client VPN CLI")]
 struct Cli {
@@ -17,7 +19,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Connect {
-        config: PathBuf,
+        #[arg(
+            value_name = "CONFIG",
+            help = "OpenVPN config path [default: ~/.awsvpnunofficial/vpnconfig.ovpn]"
+        )]
+        config: Option<PathBuf>,
 
         #[arg(long)]
         openvpn: Option<PathBuf>,
@@ -92,6 +98,7 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
             print_login_url,
             dns,
         } => {
+            let config = config.unwrap_or_else(default_config_path);
             let browser_mode = if no_browser {
                 BrowserMode::Disabled
             } else if let Some(browser) = browser {
@@ -156,6 +163,37 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
             Ok(())
         }
     }
+}
+
+fn default_config_path() -> PathBuf {
+    default_config_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(DEFAULT_CONFIG_RELATIVE_PATH)
+}
+
+fn default_config_home() -> Option<PathBuf> {
+    sudo_user_home().or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
+#[cfg(unix)]
+fn sudo_user_home() -> Option<PathBuf> {
+    let user = std::env::var("SUDO_USER").ok()?;
+    if user == "root" {
+        return None;
+    }
+
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == user)
+            .then(|| fields.nth(4).map(PathBuf::from))
+            .flatten()
+    })
+}
+
+#[cfg(not(unix))]
+fn sudo_user_home() -> Option<PathBuf> {
+    None
 }
 
 fn parse_browser(value: &str) -> Result<webbrowser::Browser, String> {
