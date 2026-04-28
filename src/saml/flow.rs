@@ -76,6 +76,12 @@ pub async fn drive_saml_auth(
             ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
             ManagementEvent::Reconnecting { reason } => {
                 if reason.as_deref() == Some("auth-failure") {
+                    if pending_state_id.is_some() || pending_assertion.is_some() {
+                        tracing::debug!(
+                            "ignoring auth-failure reconnect while SAML response is pending"
+                        );
+                        continue;
+                    }
                     return Err(Error::AuthFailed("auth-failure".to_string()));
                 }
             }
@@ -142,6 +148,82 @@ mod tests {
                 .write_all(b">PASSWORD:Need 'Auth' username/password\n")
                 .await
                 .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                "password \"Auth\" CRV1::state123::assertion-value",
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(b">STATE:123,CONNECTED,SUCCESS,10.0.0.10,1.2.3.4,443,,\n")
+                .await
+                .unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let client_flow = tokio::spawn(async move {
+            drive_saml_auth(&mut management, &acs, BrowserMode::Disabled, None).await
+        });
+
+        post_saml_response(acs_addr, "assertion-value").await;
+
+        let outcome = client_flow.await.unwrap().unwrap();
+        fake_openvpn.await.unwrap();
+
+        assert_eq!(outcome.vpn_ip, Some("10.0.0.10".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn ignores_auth_failure_reconnect_after_saml_challenge() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let acs_addr = acs.local_addr().unwrap();
+
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+
+        let fake_openvpn = tokio::spawn(async move {
+            let (stream, _) = management_listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+
+            expect_line(&mut stream, "state on").await;
+            expect_line(&mut stream, "log on").await;
+            expect_line(&mut stream, "echo on").await;
+            expect_line(&mut stream, "hold release").await;
+
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+            expect_line(&mut stream, "username \"Auth\" N/A").await;
+            expect_line(
+                &mut stream,
+                &format!("password \"Auth\" ACS::{}", acs_addr.port()),
+            )
+            .await;
+
+            stream
+                .get_mut()
+                .write_all(
+                    b">LOG:1,,AUTH: Received control message: AUTH_FAILED,CRV1:R:state123:b'Ti9B':https://idp.example.com/saml\n",
+                )
+                .await
+                .unwrap();
+            stream
+                .get_mut()
+                .write_all(b">STATE:1,RECONNECTING,auth-failure,,,,,\n")
+                .await
+                .unwrap();
+            stream
+                .get_mut()
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+
             expect_line(&mut stream, "username \"Auth\" N/A").await;
             expect_line(
                 &mut stream,

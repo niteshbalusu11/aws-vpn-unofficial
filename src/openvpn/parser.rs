@@ -7,6 +7,7 @@ const CRV1_PREFIX: &str = ">PASSWORD:Verification Failed: 'Auth' ['";
 const CRV1_SUFFIX: &str = "']";
 const CRV1_INNER_PREFIX: &str = "CRV1:R:";
 const CRV1_STATE_SENTINEL: &str = ":b'Ti9B':";
+const AUTH_FAILED_CRV1_PREFIX: &str = "AUTH_FAILED,CRV1:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagementEvent {
@@ -35,6 +36,10 @@ pub fn parse_management_line(line: &str) -> Result<ManagementEvent> {
         return parse_crv1_challenge(line).map(ManagementEvent::SamlChallenge);
     }
 
+    if line.contains(AUTH_FAILED_CRV1_PREFIX) {
+        return parse_auth_failed_crv1_challenge(line).map(ManagementEvent::SamlChallenge);
+    }
+
     if let Some(event) = parse_state(line) {
         return Ok(event);
     }
@@ -60,7 +65,19 @@ pub fn parse_crv1_challenge(line: &str) -> Result<SamlChallenge> {
         .and_then(|value| value.strip_suffix(CRV1_SUFFIX))
         .ok_or_else(|| Error::ManagementProtocol("malformed CRV1 challenge wrapper".to_string()))?;
 
-    let body = inner.strip_prefix(CRV1_INNER_PREFIX).ok_or_else(|| {
+    parse_crv1_body(inner)
+}
+
+pub fn parse_auth_failed_crv1_challenge(line: &str) -> Result<SamlChallenge> {
+    let start = line.find(AUTH_FAILED_CRV1_PREFIX).ok_or_else(|| {
+        Error::ManagementProtocol("AUTH_FAILED CRV1 challenge is missing".to_string())
+    })?;
+    let body = &line[start + "AUTH_FAILED,".len()..];
+    parse_crv1_body(body)
+}
+
+fn parse_crv1_body(body: &str) -> Result<SamlChallenge> {
+    let body = body.strip_prefix(CRV1_INNER_PREFIX).ok_or_else(|| {
         Error::ManagementProtocol("CRV1 challenge is not response-required".to_string())
     })?;
 
@@ -145,6 +162,23 @@ mod tests {
             ManagementEvent::SamlChallenge(SamlChallenge {
                 state_id: "state123".to_string(),
                 url: Url::parse("https://idp.example.com/saml?x=1").unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_auth_failed_crv1_log_saml_challenge() {
+        let event = parse_management_line(
+            ">LOG:123,,AUTH: Received control message: AUTH_FAILED,CRV1:R:instance-2/abc/uuid:b'Ti9B':https://accounts.google.com/o/saml2/idp?SAMLRequest=abc%3D",
+        )
+        .unwrap();
+
+        assert_eq!(
+            event,
+            ManagementEvent::SamlChallenge(SamlChallenge {
+                state_id: "instance-2/abc/uuid".to_string(),
+                url: Url::parse("https://accounts.google.com/o/saml2/idp?SAMLRequest=abc%3D")
+                    .unwrap(),
             })
         );
     }

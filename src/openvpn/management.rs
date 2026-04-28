@@ -3,7 +3,7 @@ use crate::openvpn::parser::{ManagementEvent, parse_management_line};
 use crate::{Error, Result};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time;
@@ -70,24 +70,65 @@ impl ManagementClient {
     pub async fn authenticate(&mut self, password: &str) -> Result<()> {
         tracing::debug!("waiting for OpenVPN management password prompt");
         loop {
-            let Some(line) = self.read_line().await? else {
+            match self.read_auth_message().await? {
+                AuthMessage::PasswordPrompt => {
+                    tracing::debug!("received OpenVPN management password prompt");
+                    self.send_raw_line(password).await?;
+                }
+                AuthMessage::Success => {
+                    tracing::debug!("OpenVPN management authentication succeeded");
+                    return Ok(());
+                }
+                AuthMessage::Error(message) => {
+                    return Err(Error::ManagementProtocol(message));
+                }
+                AuthMessage::Other(message) => {
+                    tracing::debug!(
+                        message,
+                        "received OpenVPN management authentication message"
+                    );
+                }
+                AuthMessage::Closed => {
+                    return Err(Error::ManagementProtocol(
+                        "management socket closed during authentication".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn read_auth_message(&mut self) -> Result<AuthMessage> {
+        let mut buffer = String::new();
+        let mut byte = [0_u8; 1];
+
+        loop {
+            let read = self
+                .reader
+                .read(&mut byte)
+                .await
+                .map_err(Error::ManagementIo)?;
+
+            if read == 0 {
+                if buffer.is_empty() {
+                    return Ok(AuthMessage::Closed);
+                }
+                return Ok(classify_auth_message(buffer.trim_end()));
+            }
+
+            buffer.push(byte[0] as char);
+
+            if buffer.ends_with("ENTER PASSWORD:") {
+                return Ok(AuthMessage::PasswordPrompt);
+            }
+
+            if buffer.ends_with('\n') {
+                return Ok(classify_auth_message(buffer.trim_end()));
+            }
+
+            if buffer.len() > 4096 {
                 return Err(Error::ManagementProtocol(
-                    "management socket closed during authentication".to_string(),
+                    "management authentication message was too large".to_string(),
                 ));
-            };
-
-            tracing::debug!("received OpenVPN management authentication line");
-            if line.starts_with("ENTER PASSWORD:") {
-                self.send_raw_line(password).await?;
-                continue;
-            }
-
-            if line.starts_with("SUCCESS:") {
-                return Ok(());
-            }
-
-            if line.starts_with("ERROR:") {
-                return Err(Error::ManagementProtocol(line));
             }
         }
     }
@@ -132,6 +173,29 @@ impl ManagementClient {
         self.send(&ManagementCommand::Signal("SIGTERM".to_string()))
             .await?;
         self.send(&ManagementCommand::Quit).await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthMessage {
+    PasswordPrompt,
+    Success,
+    Error(String),
+    Other(String),
+    Closed,
+}
+
+fn classify_auth_message(message: &str) -> AuthMessage {
+    if message.is_empty() {
+        AuthMessage::Other(String::new())
+    } else if message.starts_with("ENTER PASSWORD:") {
+        AuthMessage::PasswordPrompt
+    } else if message.starts_with("SUCCESS:") {
+        AuthMessage::Success
+    } else if message.starts_with("ERROR:") {
+        AuthMessage::Error(message.to_string())
+    } else {
+        AuthMessage::Other(message.to_string())
     }
 }
 
@@ -248,6 +312,39 @@ mod tests {
             reader
                 .get_mut()
                 .write_all(b"ENTER PASSWORD:\n")
+                .await
+                .unwrap();
+
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"SUCCESS: password is correct\n")
+                .await
+                .unwrap();
+            line.trim_end().to_string()
+        });
+
+        let mut client = ManagementClient::connect(addr).await.unwrap();
+        client
+            .authenticate("secret-management-password")
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), "secret-management-password");
+    }
+
+    #[tokio::test]
+    async fn authenticates_management_password_prompt_without_newline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            reader
+                .get_mut()
+                .write_all(b"INFO:OpenVPN Management Interface\nENTER PASSWORD:")
                 .await
                 .unwrap();
 

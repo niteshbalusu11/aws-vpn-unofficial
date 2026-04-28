@@ -3,7 +3,8 @@ const REDACTED: &str = "[REDACTED]";
 pub fn redact_line(line: &str) -> String {
     let line = redact_auth_password_command(line);
     let line = redact_saml_response_param(&line);
-    redact_crv1_assertion(&line)
+    let line = redact_crv1_assertion(&line);
+    redact_auth_failed_crv1_url(&line)
 }
 
 fn redact_auth_password_command(line: &str) -> String {
@@ -35,6 +36,22 @@ fn redact_crv1_assertion(line: &str) -> String {
 
     let mut redacted = String::with_capacity(assertion_start + REDACTED.len());
     redacted.push_str(&line[..assertion_start]);
+    redacted.push_str(REDACTED);
+    redacted
+}
+
+fn redact_auth_failed_crv1_url(line: &str) -> String {
+    let Some(start) = line.find("AUTH_FAILED,CRV1:") else {
+        return line.to_string();
+    };
+
+    let Some(relative_sentinel) = line[start..].find(":b'Ti9B':") else {
+        return line.to_string();
+    };
+    let url_start = start + relative_sentinel + ":b'Ti9B':".len();
+
+    let mut redacted = String::with_capacity(url_start + REDACTED.len());
+    redacted.push_str(&line[..url_start]);
     redacted.push_str(REDACTED);
     redacted
 }
@@ -80,5 +97,15 @@ mod tests {
     fn redacts_crv1_assertion() {
         let line = "auth failed CRV1::state123::very-secret-assertion";
         assert_eq!(redact_line(line), "auth failed CRV1::state123::[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_auth_failed_crv1_url() {
+        let line =
+            "AUTH_FAILED,CRV1:R:state:b'Ti9B':https://accounts.google.com/saml?SAMLRequest=secret";
+        assert_eq!(
+            redact_line(line),
+            "AUTH_FAILED,CRV1:R:state:b'Ti9B':[REDACTED]"
+        );
     }
 }
