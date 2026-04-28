@@ -1,6 +1,6 @@
 use crate::logredact::redact_line;
 use crate::{Error, Result, VpnEvent};
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 use std::fs::OpenOptions;
 use std::io::Write;
