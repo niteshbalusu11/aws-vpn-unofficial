@@ -19,6 +19,16 @@ fail_arch() {
   exit 1
 }
 
+require_file_tokens() {
+  local target="$1"
+  local file_output="$2"
+  shift 2
+
+  for token in "$@"; do
+    [[ "$file_output" == *"$token"* ]] || fail_arch "$target" "$file_output"
+  done
+}
+
 require_helper() {
   if [[ ! -f "$1" ]]; then
     printf 'missing macOS DNS helper for %s: %s\n' "$2" "$1" >&2
@@ -52,20 +62,20 @@ for target in "${TARGETS[@]}"; do
   file_output="$(file "$binary")"
   case "$target" in
     aarch64-apple-darwin)
-      [[ "$file_output" == *"Mach-O 64-bit executable arm64"* ]] || fail_arch "$target" "$file_output"
+      require_file_tokens "$target" "$file_output" "Mach-O 64-bit" "arm64" "executable"
       require_helper "$runtime_dir/client.up" "$target"
       require_helper "$runtime_dir/client.down" "$target"
       ;;
     x86_64-apple-darwin)
-      [[ "$file_output" == *"Mach-O 64-bit executable x86_64"* ]] || fail_arch "$target" "$file_output"
+      require_file_tokens "$target" "$file_output" "Mach-O 64-bit" "x86_64" "executable"
       require_helper "$runtime_dir/client.up" "$target"
       require_helper "$runtime_dir/client.down" "$target"
       ;;
     aarch64-unknown-linux-gnu)
-      [[ "$file_output" == *"ELF 64-bit"* && "$file_output" == *"ARM aarch64"* ]] || fail_arch "$target" "$file_output"
+      require_file_tokens "$target" "$file_output" "ELF 64-bit" "ARM aarch64"
       ;;
     x86_64-unknown-linux-gnu)
-      [[ "$file_output" == *"ELF 64-bit"* && "$file_output" == *"x86-64"* ]] || fail_arch "$target" "$file_output"
+      require_file_tokens "$target" "$file_output" "ELF 64-bit" "x86-64"
       ;;
     *)
       printf 'unknown target: %s\n' "$target" >&2

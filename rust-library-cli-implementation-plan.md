@@ -4,6 +4,26 @@ Date: 2026-04-28
 
 This document turns the reverse-engineering notes in `awsvpn-cli-reverse-engineering-plan.md` into an implementation plan for a Rust crate that exposes reusable library APIs plus a thin CLI.
 
+## Current Status
+
+Completed so far:
+
+- Rust library crate and thin `awsvpn` CLI are implemented.
+- SAML ACS server, browser launch, OpenVPN management protocol handling, CRV1 challenge parsing, and fake management tests are implemented.
+- Real OpenVPN process orchestration works with the AWS-compatible OpenVPN management flow.
+- `--openvpn` remains as an override, but the default runtime is now bundled and embedded into the Rust binary.
+- Runtime assets are committed under `assets/openvpn-runtime/<target>/openvpn` for:
+  - `aarch64-apple-darwin`
+  - `x86_64-apple-darwin`
+  - `aarch64-unknown-linux-gnu`
+  - `x86_64-unknown-linux-gnu`
+- macOS DNS is handled by original bundled `client.up` / `client.down` scripts, with Rust fallback for pushed DNS when scripts are absent.
+- Linux OpenVPN runtimes are packaged, but Linux DNS integration is still pending.
+- CI is split into regular CI and a manual runtime-refresh workflow:
+  - regular CI validates committed runtime assets and builds self-contained binaries,
+  - `Build OpenVPN Runtime Assets` is manual-only and rebuilds raw OpenVPN runtime assets when the source version changes.
+- GPL-2.0-only licensing and third-party notices are documented.
+
 The goal is to make the VPN/SAML/OpenVPN orchestration usable from:
 
 ```bash
@@ -170,7 +190,7 @@ Sketch:
 ```rust
 pub struct ConnectOptions {
     pub config_path: PathBuf,
-    pub openvpn_binary: Option<PathBuf>,
+    pub openvpn_runtime: OpenVpnRuntime,
     pub management_host: IpAddr,
     pub management_port: Option<u16>,
     pub acs_host: IpAddr,
@@ -190,6 +210,7 @@ Defaults:
 - `acs_port`: `35001`
 - `auth_timeout`: 10 minutes
 - `browser`: open system browser
+- `openvpn_runtime`: bundled runtime
 - `dns_mode`: initially `OpenVpnDefault`
 
 ### `VpnSession`
@@ -470,31 +491,38 @@ Goal: users should not need the AWS VPN desktop app installed. The released CLI 
 
 #### Runtime Layout
 
-Use a predictable runtime directory next to the `awsvpn` binary:
+Runtime assets are committed under `assets/openvpn-runtime/<target>/openvpn`
+and embedded by `build.rs` into the Rust binary for the matching Cargo target.
+At runtime, the library extracts the embedded files into a private temporary
+directory and runs `acvc-openvpn` as a child process.
+
+The embedded runtime layout is:
 
 ```text
-awsvpn
-openvpn/
+assets/openvpn-runtime/<target>/openvpn/
   acvc-openvpn
   client.up        # only where script-based DNS is used
   client.down      # only where script-based DNS is used
   openssl.cnf      # if required by the OpenVPN build
-  providers/       # if required by the OpenSSL build
+  README.runtime.txt
 ```
 
-Package managers can also install the runtime under:
+Future package-manager layouts may still install the runtime under:
 
 ```text
 libexec/awsvpn/openvpn/
 ```
 
-The Rust runtime resolver should search in this order:
+The Rust runtime resolver currently supports:
 
 1. `--openvpn <path>`
-2. `AWSVPN_OPENVPN=<path>`
-3. bundled runtime next to the executable
-4. package-manager runtime under `libexec/awsvpn/openvpn`
-5. development-only AWS VPN app fallback, gated so it is never the packaged default
+2. embedded bundled runtime
+
+Potential future resolver sources:
+
+1. `AWSVPN_OPENVPN=<path>`
+2. package-manager runtime under `libexec/awsvpn/openvpn`
+3. development-only AWS VPN app fallback, gated so it is never the packaged default
 
 #### Source and Build Strategy
 
@@ -536,61 +564,74 @@ Medium term:
 
 #### Packaging TODOs
 
-- [ ] Add `openvpn::runtime` resolver for explicit/env/bundled/package-manager paths.
-- [ ] Make `--openvpn` optional once runtime discovery is implemented.
-- [ ] Add CLI output that logs which OpenVPN runtime source was used.
-- [ ] Add tests for runtime discovery ordering.
+- [x] Add bundled runtime abstraction with explicit external override.
+- [x] Make `--openvpn` optional once bundled runtime is implemented.
+- [x] Embed runtime assets at compile time from `assets/openvpn-runtime/<target>/openvpn`.
+- [x] Extract embedded runtime into a private temporary runtime directory.
+- [x] Add tests for bundled runtime extraction and path validation.
 - [x] Add `packaging/openvpn/README.md` with source URL, build prerequisites, and expected artifact layout.
 - [x] Add `packaging/openvpn/build-openvpn.sh` skeleton for local and CI builds.
+- [x] Add checksum verification for downloaded OpenVPN source tarballs.
+- [x] Decide whether to vendor source tarballs, download in CI, or use release assets only. Current decision: commit built runtime assets and use a manual CI workflow to regenerate them from AWS's published source tarball.
+- [x] Build Linux amd64 AWS-patched OpenVPN artifact.
+- [x] Build Linux arm64 AWS-patched OpenVPN artifact.
+- [x] Build macOS amd64 AWS-patched OpenVPN artifact.
+- [x] Build macOS arm64 AWS-patched OpenVPN artifact.
+- [x] Package DNS helper scripts after license review. Current macOS helpers are original project scripts.
+- [x] Replace macOS AWS script dependency with our own scripts and Rust fallback.
+- [x] Add regular CI matrix that builds self-contained binaries from committed runtime assets.
+- [x] Add manual `Build OpenVPN Runtime Assets` CI workflow for OpenVPN runtime refreshes.
+- [x] Add committed runtime asset validation script.
+- [x] Add GPL-2.0-only license and third-party notices.
 - [ ] Add optional patch-regeneration script based on the `aws-vpn-client/aws-vpn-client` `extract.sh` workflow.
-- [ ] Add checksum recording for downloaded OpenVPN source tarballs.
-- [ ] Decide whether to vendor source tarballs, download in CI, or use release assets only.
-- [ ] Build Linux amd64 AWS-patched OpenVPN artifact.
-- [ ] Build Linux arm64 AWS-patched OpenVPN artifact.
-- [ ] Build macOS amd64 AWS-patched OpenVPN artifact.
-- [ ] Build macOS arm64 AWS-patched OpenVPN artifact.
-- [ ] Package DNS helper scripts only after license review.
-- [ ] Replace macOS AWS script dependency with our own script or direct Rust `scutil` implementation.
 - [ ] Implement Linux DNS through `systemd-resolved`.
 - [ ] Implement Linux DNS through `resolvconf`.
 - [ ] Add release archive layout tests.
-- [ ] Add CI matrix that verifies `awsvpn connect --dry-run-runtime` can find bundled OpenVPN.
 - [ ] Document unsupported distros and required privileges.
+- [ ] Add CLI output that logs which OpenVPN runtime source was used without exposing sensitive paths in normal mode.
+- [ ] Add optional package-manager runtime resolver.
 
 ## Module TODOs
 
 ### Library Root
 
-- [ ] Add `src/lib.rs`.
-- [ ] Export `VpnClient`, `ConnectOptions`, `VpnSession`, `VpnEvent`, `Error`, and `Result`.
-- [ ] Keep internal modules private until their API is proven.
-- [ ] Add crate-level docs explaining the SAML/OpenVPN management flow at a high level.
+- [x] Add `src/lib.rs`.
+- [x] Export `VpnClient`, `ConnectOptions`, `VpnSession`, `VpnEvent`, `Error`, and `Result`.
+- [x] Export `OpenVpnRuntime` and bundled runtime availability helpers.
+- [x] Keep internal modules private until their API is proven.
+- [x] Add crate-level docs explaining the library-first purpose.
+- [ ] Add fuller crate-level docs explaining the SAML/OpenVPN management flow at a high level.
 
 ### CLI
 
-- [ ] Replace `src/main.rs` hello-world with `clap` parser.
-- [ ] Implement `connect <config.ovpn>`.
-- [ ] Add `--openvpn <path>`.
-- [ ] Add `--debug`.
-- [ ] Add `--no-browser`.
-- [ ] Add `--print-login-url`.
-- [x] Add signal handling for Ctrl-C.
-- [ ] Map library errors to actionable CLI messages.
+- [x] Replace `src/main.rs` hello-world with `clap` parser.
+- [x] Implement `connect <config.ovpn>`.
+- [x] Add `--openvpn <path>`.
+- [x] Make `--openvpn` optional by defaulting to bundled runtime.
+- [x] Add `--debug`.
+- [x] Add `--no-browser`.
+- [x] Add `--browser`.
+- [x] Add `--print-login-url`.
+- [x] Add `--dns`.
+- [x] Add `diagnose`.
+- [x] Add signal handling for Ctrl-C, SIGTERM, and SIGHUP.
+- [x] Map common library errors to actionable CLI messages.
 - [x] Ensure CLI logs are redacted by default.
 
 ### Config Parsing
 
-- [ ] Validate config path exists.
-- [ ] Parse `remote` host and port.
-- [ ] Detect `auth-user-pass`.
-- [ ] Detect `auth-federate`.
-- [ ] Preserve original config without destructive rewrites.
-- [ ] Decide whether MVP requires `auth-user-pass` or normalizes `auth-federate`.
-- [ ] Add tests for representative AWS Client VPN configs.
+- [x] Validate config path exists.
+- [x] Parse `remote` host and port.
+- [x] Detect `auth-user-pass`.
+- [x] Detect `auth-federate`.
+- [x] Preserve original config without destructive rewrites.
+- [x] Accept `auth-user-pass` or `auth-federate` for MVP.
+- [x] Reject config script/plugin directives before running OpenVPN as root.
+- [x] Add tests for representative AWS Client VPN configs.
 
 ### OpenVPN Process
 
-- [ ] Locate OpenVPN binary.
+- [x] Locate OpenVPN binary from explicit path or bundled runtime.
 - [x] Create temp work directory.
 - [x] Generate management password.
 - [x] Write management password file with `0600` permissions.
@@ -600,6 +641,8 @@ Medium term:
 - [x] Implement graceful shutdown.
 - [x] Kill child only after graceful shutdown timeout.
 - [x] Delete temp files on drop.
+- [x] Stage trusted DNS helper scripts next to OpenVPN when present.
+- [x] Avoid enabling `--script-security 2` unless trusted helper scripts are staged.
 
 OpenVPN args for MVP:
 
@@ -626,60 +669,65 @@ OpenVPN args for MVP:
 - [x] Support `password "Auth" ...`.
 - [x] Support `signal SIGTERM`.
 - [x] Support `quit`.
-- [ ] Add reconnect/error handling for management socket close.
+- [x] Handle auth-failure reconnect during SAML flow.
+- [x] Report management socket close as a protocol error.
+- [ ] Add broader reconnect/error handling for unexpected management socket close after connection.
 
 ### Management Parser
 
-- [ ] Parse `>PASSWORD:Need 'Auth' username/password`.
-- [ ] Parse CRV1 SAML challenge.
-- [ ] Parse `>STATE:...,CONNECTED,SUCCESS,...`.
-- [ ] Parse `>STATE:...,RECONNECTING,...`.
-- [ ] Parse `AUTH_FAILED`.
-- [ ] Parse `>FATAL:`.
-- [ ] Parse useful `>LOG:` lines.
-- [ ] Reject malformed CRV1 messages.
-- [ ] Validate CRV1 challenge type is response-required.
-- [ ] Extract opaque `state_id` exactly.
-- [ ] Extract SAML URL exactly.
-- [ ] Unit test valid and invalid parser fixtures.
+- [x] Parse `>PASSWORD:Need 'Auth' username/password`.
+- [x] Parse CRV1 SAML challenge.
+- [x] Parse CRV1 challenge from `AUTH_FAILED` log lines.
+- [x] Parse `>STATE:...,CONNECTED,SUCCESS,...`.
+- [x] Parse `>STATE:...,RECONNECTING,...`.
+- [x] Parse `AUTH_FAILED`.
+- [x] Parse `>FATAL:`.
+- [x] Parse pushed DNS from useful `PUSH_REPLY` log lines.
+- [x] Reject malformed CRV1 messages.
+- [x] Validate CRV1 challenge type is response-required.
+- [x] Extract opaque `state_id` exactly.
+- [x] Extract SAML URL exactly.
+- [x] Unit test valid and invalid parser fixtures.
 - [ ] Fuzz CRV1 parser after MVP.
 
 ### SAML ACS Server
 
-- [ ] Bind `127.0.0.1:35001`.
-- [ ] Return clear error if port is in use.
-- [ ] Accept only `POST /`.
-- [ ] Parse `application/x-www-form-urlencoded`.
-- [ ] Extract `SAMLResponse`.
-- [ ] Enforce 128 KiB max.
-- [ ] Send one assertion through a one-shot channel.
-- [ ] Return minimal success HTML.
-- [ ] Return minimal failure HTML.
-- [ ] Stop after one valid assertion.
-- [ ] Stop after timeout.
-- [ ] Do not log assertion value.
-- [ ] Add tests for valid POST, missing response, oversized response, wrong method, wrong path.
+- [x] Bind `127.0.0.1:35001` by default.
+- [x] Support configurable loopback ACS host/port.
+- [x] Return clear error if port is in use.
+- [x] Accept only `POST /`.
+- [x] Parse `application/x-www-form-urlencoded`.
+- [x] Extract `SAMLResponse`.
+- [x] Enforce 128 KiB max.
+- [x] Reject control characters in assertions before writing to management socket.
+- [x] Send one assertion through a one-shot receive path.
+- [x] Return minimal success HTML.
+- [x] Return minimal failure HTML.
+- [x] Stop after one valid assertion.
+- [x] Stop after timeout.
+- [x] Do not log assertion value.
+- [x] Add tests for valid POST, missing response, oversized response, wrong method, wrong path, and control characters.
 
 ### Browser Opener
 
-- [ ] Validate URL with `url` crate.
-- [ ] Require `https`.
-- [ ] Implement macOS `open`.
-- [ ] Implement Linux `xdg-open`.
-- [ ] Implement Windows `rundll32 url.dll,FileProtocolHandler`.
-- [ ] Never use shell interpolation.
-- [ ] Support `BrowserMode::Disabled` for tests/headless usage.
-- [ ] Support explicit URL printing only when requested.
+- [x] Validate URL with `url` crate.
+- [x] Require `https`.
+- [x] Use `webbrowser` crate for platform browser launching.
+- [x] Never use shell interpolation.
+- [x] Support `BrowserMode::Disabled` for tests/headless usage.
+- [x] Support explicit URL printing only when requested.
 
 ### SAML Flow Orchestrator
 
 - [x] Coordinate ACS server, management events, browser opener, and assertion delivery.
 - [x] Track pending CRV1 `state_id`.
-- [ ] Refuse unexpected ACS submissions before a challenge is active.
+- [x] Ignore duplicate SAML challenges after assertion callback.
+- [x] Replay SAML response when OpenVPN prompts again after auth-failure reconnect.
+- [x] Refuse malformed ACS submissions before a valid POST.
 - [x] Apply 10 minute auth timeout.
-- [ ] Redact all sensitive data in errors/events.
+- [x] Redact sensitive OpenVPN output in events/logs.
 - [ ] Ensure assertion is zeroized/dropped after sending.
-- [ ] Handle user interruption while waiting for browser login.
+- [x] Handle user interruption while waiting for browser login through CLI signal path.
 
 ### DNS and Routing
 
@@ -693,6 +741,8 @@ OpenVPN args for MVP:
 - [x] Add `DnsMode` enum to public options before exposing behavior.
 - [x] Add reusable route/DNS diagnostics API.
 - [x] Add `awsvpn diagnose` CLI command.
+- [x] Make non-macOS native DNS fallback fail explicitly instead of silently ignoring pushed DNS.
+- [x] Make diagnostics platform-specific; currently implemented on macOS.
 
 ### Logging and Redaction
 
@@ -700,35 +750,36 @@ OpenVPN args for MVP:
 - [x] Redact `password "Auth" ...`.
 - [x] Redact `CRV1::<state>::<assertion>`.
 - [x] Redact `SAMLResponse=...`.
-- [ ] Redact management password file content.
+- [x] Avoid logging management password file content.
 - [ ] Consider redacting SAML login URL by default.
 - [x] Unit test common sensitive line shapes.
 
 ### Tests
 
-- [ ] Unit test management parser.
-- [ ] Unit test ACS form parsing.
-- [ ] Unit test URL validation.
-- [ ] Unit test log redaction.
-- [ ] Unit test command quoting.
-- [ ] Integration test with fake OpenVPN management server.
-- [ ] Integration test browser-disabled SAML flow.
-- [ ] Manual real AWS Client VPN test.
+- [x] Unit test management parser.
+- [x] Unit test ACS form parsing.
+- [x] Unit test URL validation.
+- [x] Unit test log redaction.
+- [x] Unit test command quoting.
+- [x] Integration test with fake OpenVPN management server.
+- [x] Integration test browser-disabled SAML flow.
+- [x] Manual real AWS Client VPN test on macOS.
+- [x] Package validation via `cargo package`.
+- [x] Runtime asset validation script.
 
 ### Fake Management Server
 
-- [ ] Build test helper that listens on a local port.
-- [ ] Emit initial management greeting.
-- [ ] Expect `state on`, `log on`, `echo on`, `hold release`.
-- [ ] Emit `>PASSWORD:Need 'Auth' username/password`.
-- [ ] Expect `username "Auth" N/A`.
-- [ ] Expect `password "Auth" ACS::35001`.
-- [ ] Emit CRV1 challenge with fake HTTPS URL.
-- [ ] Trigger fake ACS POST in test.
-- [ ] Emit second password prompt.
-- [ ] Expect `password "Auth" CRV1::<state>::<assertion>`.
-- [ ] Emit connected state.
-- [ ] Assert session reaches connected.
+- [x] Build test helper that listens on a local port.
+- [x] Expect `state on`, `log on`, `echo on`, `hold release`.
+- [x] Emit `>PASSWORD:Need 'Auth' username/password`.
+- [x] Expect `username "Auth" N/A`.
+- [x] Expect `password "Auth" ACS::<port>`.
+- [x] Emit CRV1 challenge with fake HTTPS URL.
+- [x] Trigger fake ACS POST in test.
+- [x] Emit second password prompt where needed.
+- [x] Expect `password "Auth" CRV1::<state>::<assertion>`.
+- [x] Emit connected state.
+- [x] Assert session reaches connected.
 
 ## Milestones
 
@@ -738,17 +789,17 @@ Goal: establish the public API and CLI wrapper.
 
 TODO:
 
-- [ ] Add library crate.
-- [ ] Add `clap` CLI.
-- [ ] Add `Error` and `Result`.
-- [ ] Add `ConnectOptions`.
-- [ ] Add no-op `VpnClient::connect` placeholder.
-- [ ] Add CI-ready `cargo test`.
+- [x] Add library crate.
+- [x] Add `clap` CLI.
+- [x] Add `Error` and `Result`.
+- [x] Add `ConnectOptions`.
+- [x] Add `VpnClient::connect`.
+- [x] Add CI-ready `cargo test`.
 
 Acceptance:
 
 - `cargo test` passes.
-- `cargo run -- connect ./x.ovpn` reaches the library path and returns a clear not-implemented error.
+- `cargo run -- connect ./client-config.ovpn` reaches the library path and validates the config.
 
 ### Milestone 2: Protocol Parser and Redaction
 
@@ -791,10 +842,10 @@ Goal: prove the full auth state machine without a real VPN.
 
 TODO:
 
-- [ ] Implement management client.
-- [ ] Implement fake management integration test.
-- [ ] Implement SAML flow orchestrator.
-- [ ] Implement event stream.
+- [x] Implement management client.
+- [x] Implement fake management integration test.
+- [x] Implement SAML flow orchestrator.
+- [x] Implement event stream.
 
 Acceptance:
 
@@ -811,11 +862,12 @@ TODO:
 - [x] Implement management port selection.
 - [x] Implement secure temp files.
 - [x] Implement graceful shutdown.
-- [x] Add `--openvpn` flag.
+- [x] Add bundled OpenVPN runtime extraction.
+- [x] Add `--openvpn` override flag.
 
 Acceptance:
 
-- CLI starts patched OpenVPN.
+- CLI starts bundled or explicitly supplied patched OpenVPN.
 - Management socket connects.
 - Ctrl-C shuts down OpenVPN and cleans temp files.
 
@@ -825,16 +877,17 @@ Goal: connect to a real SAML Client VPN endpoint.
 
 TODO:
 
-- [ ] Test with an actual AWS Client VPN `.ovpn`.
-- [ ] Confirm browser opens.
-- [ ] Confirm SAML login posts to ACS.
-- [ ] Confirm management sends CRV1 assertion.
-- [ ] Confirm `CONNECTED,SUCCESS`.
-- [ ] Confirm Ctrl-C disconnects.
+- [x] Test with an actual AWS Client VPN `.ovpn`.
+- [x] Confirm browser opens.
+- [x] Confirm SAML login posts to ACS.
+- [x] Confirm management sends CRV1 assertion.
+- [x] Confirm `CONNECTED,SUCCESS`.
+- [x] Confirm Ctrl-C disconnects.
 
 Acceptance:
 
-- `sudo awsvpn connect ./client-config.ovpn --openvpn <patched-openvpn>` reaches connected state.
+- `sudo awsvpn connect ./client-config.ovpn` reaches connected state with the bundled runtime.
+- `sudo awsvpn connect ./client-config.ovpn --openvpn <patched-openvpn>` remains available for local debugging.
 
 ### Milestone 7: Linux Usability
 
@@ -842,9 +895,9 @@ Goal: make the MVP useful on target Linux distros.
 
 TODO:
 
-- [ ] Build AWS-patched OpenVPN for Linux amd64.
-- [ ] Build AWS-patched OpenVPN for Linux arm64.
-- [ ] Add packaging layout.
+- [x] Build AWS-patched OpenVPN for Linux amd64.
+- [x] Build AWS-patched OpenVPN for Linux arm64.
+- [x] Add packaging layout.
 - [ ] Add DNS support for `systemd-resolved`.
 - [ ] Add DNS support for `resolvconf`.
 - [ ] Test Fedora.
@@ -880,12 +933,12 @@ Goal: support macOS without relying on AWS's installed app.
 
 TODO:
 
-- [ ] Build AWS-patched OpenVPN for darwin-amd64.
-- [ ] Build AWS-patched OpenVPN for darwin-arm64.
-- [x] Implement macOS DNS setup via AWS `client.up` / `client.down` scripts when using the installed AWS OpenVPN bundle.
+- [x] Build AWS-patched OpenVPN for darwin-amd64.
+- [x] Build AWS-patched OpenVPN for darwin-arm64.
+- [x] Implement macOS DNS setup via bundled `client.up` / `client.down` scripts.
 - [x] Define current privilege story in README: macOS connect requires `sudo` when OpenVPN configures `utun`, routes, and DNS scripts.
 - [ ] Test Intel Mac.
-- [ ] Test Apple Silicon.
+- [x] Test Apple Silicon.
 
 Acceptance:
 
@@ -894,21 +947,29 @@ Acceptance:
 
 ## Open Questions
 
-1. Should the public crate name be `awsvpn`, `aws_vpn_unofficial`, or something else?
-2. Should `VpnClient::connect` return only after connected, or return immediately with a session that emits progress events?
-3. Should the library own signal handling, or should only the CLI install Ctrl-C handlers?
-4. Should SAML login URL ever be emitted as a public event, or only printed behind `--print-login-url`?
-5. Should profile management live in the core library or a separate optional feature?
-6. Should DNS management be enabled by default once implemented, or remain opt-in per platform?
-7. Should we support alternate ACS ports experimentally, or hard-code `35001` for AWS compatibility?
-8. Should we use `hyper` for ACS or a tiny purpose-built HTTP parser?
+Resolved:
+
+1. The package is `aws-vpn-unofficial`; the library crate and binary expose `awsvpn`.
+2. `VpnClient::connect` returns a connected session after the tunnel reaches `CONNECTED,SUCCESS`.
+3. Signal handling is owned by the CLI; the library exposes explicit session cleanup.
+4. SAML login URLs are only printed behind `--print-login-url`.
+5. The ACS server uses a tiny purpose-built parser, keeping dependencies and attack surface small.
+6. Bundled runtime is the default; `--openvpn` remains as an explicit external override.
+7. The project is GPL-2.0-only because it ships AWS/OpenVPN-derived runtime artifacts and helper scripts.
+
+Still open:
+
+1. Should profile management live in the core library or a separate optional feature?
+2. What should the default Linux DNS strategy be when both `systemd-resolved` and `resolvconf` are available?
+3. Should we support alternate ACS ports experimentally, or hard-code `35001` for AWS compatibility?
+4. Should SAML assertions be explicitly zeroized after management handoff?
+5. Should the SAML login URL be redacted by default in debug logs even before authentication?
 
 ## Immediate Next Steps
 
-1. Convert `Cargo.toml` into a library-plus-binary crate with real dependencies.
-2. Add `src/lib.rs`, `src/error.rs`, `src/client.rs`, and basic public types.
-3. Implement `clap` CLI with a `connect` command.
-4. Implement parser and redaction first, before process spawning.
-5. Add fake management server tests before testing against a real AWS endpoint.
-
-The first useful deliverable should be a tested protocol core, not a working process wrapper. Once the parser, ACS server, and fake management flow are solid, wiring in real OpenVPN becomes much lower risk.
+1. Commit the organized runtime assets and workflow split.
+2. Re-run the PR CI and confirm the package crate job passes with committed assets.
+3. Implement Linux DNS, starting with `systemd-resolved` and falling back to `resolvconf`.
+4. Add release archive layout tests for the self-contained binary path.
+5. Add runtime-source logging so debug output clearly shows whether bundled or external OpenVPN is being used.
+6. Add distro documentation for privileges, DNS modes, and unsupported Linux setups.
