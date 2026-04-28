@@ -18,6 +18,7 @@ pub mod saml;
 
 pub use client::{
     BrowserMode, ConnectOptions, DnsMode, LogLevel, RouteMode, VpnClient, VpnSession,
+    validate_dns_search_domain,
 };
 pub use diagnose::{Diagnostics, RouteEntry, collect_diagnostics};
 pub use error::{Error, Result};

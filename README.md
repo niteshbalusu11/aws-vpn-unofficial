@@ -84,6 +84,20 @@ Skip VPN DNS configuration when another tool manages DNS:
 sudo awsvpn connect --dns disabled
 ```
 
+Route a private DNS suffix to the VPN DNS resolver when the endpoint does not
+push a usable search domain:
+
+```bash
+sudo awsvpn connect --dns-domain zebedee.io
+```
+
+You can make DNS suffixes persistent by listing them one per line in
+`~/.awsvpnunofficial/dns-domains`:
+
+```text
+zebedee.io
+```
+
 Keep normal internet routing even if the VPN endpoint pushes a default route:
 
 ```bash
@@ -140,6 +154,15 @@ without VPN DNS while debugging:
 ```bash
 sudo awsvpn disconnect
 sudo awsvpn connect --dns disabled
+```
+
+If internal names do not resolve but direct queries to the VPN DNS server do,
+add the internal DNS suffix explicitly:
+
+```bash
+dig @172.31.0.2 grafana.lightning.zebedee.io
+sudo awsvpn disconnect
+sudo awsvpn connect --dns-domain zebedee.io
 ```
 
 On macOS, you can inspect the active resolver state with:

@@ -29,14 +29,16 @@ const MACOS_DNS_SERVICE_KEY: &str = "com.amazonaws.acvc";
 pub fn configure_native_dns(
     servers: &[Ipv4Addr],
     vpn_ip: Option<IpAddr>,
+    search_domains: &[String],
 ) -> Result<Option<NativeDnsGuard>> {
-    configure_native_dns_impl(servers, vpn_ip)
+    configure_native_dns_impl(servers, vpn_ip, search_domains)
 }
 
 #[cfg(target_os = "macos")]
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
     _vpn_ip: Option<IpAddr>,
+    search_domains: &[String],
 ) -> Result<Option<NativeDnsGuard>> {
     if servers.is_empty() {
         return Ok(None);
@@ -47,13 +49,12 @@ fn configure_native_dns_impl(
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" ");
+    let domain_values = dns_search_domain_values(search_domains).join(" ");
     let commands = format!(
         "\
 d.init
 d.add ServerAddresses * {server_values}
-d.add SupplementalMatchDomains * openvpn
-d.add SearchDomains * openvpn
-d.add DomainName openvpn
+d.add SupplementalMatchDomains * {domain_values}
 set State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
 "
     );
@@ -66,6 +67,7 @@ set State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
     vpn_ip: Option<IpAddr>,
+    search_domains: &[String],
 ) -> Result<Option<NativeDnsGuard>> {
     if servers.is_empty() {
         return Ok(None);
@@ -77,7 +79,7 @@ fn configure_native_dns_impl(
         ));
     };
     let interface = linux_interface_for_ipv4(vpn_ip)?;
-    let linux = configure_linux_dns(&interface, servers)?;
+    let linux = configure_linux_dns(&interface, servers, search_domains)?;
 
     Ok(Some(NativeDnsGuard { linux: Some(linux) }))
 }
@@ -86,6 +88,7 @@ fn configure_native_dns_impl(
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
     _vpn_ip: Option<IpAddr>,
+    _search_domains: &[String],
 ) -> Result<Option<NativeDnsGuard>> {
     if servers.is_empty() {
         return Ok(None);
@@ -187,15 +190,19 @@ fn linux_interface_for_ipv4(addr: Ipv4Addr) -> Result<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_dns(interface: &str, servers: &[Ipv4Addr]) -> Result<LinuxDnsGuard> {
+fn configure_linux_dns(
+    interface: &str,
+    servers: &[Ipv4Addr],
+    search_domains: &[String],
+) -> Result<LinuxDnsGuard> {
     let mut errors = Vec::new();
 
-    match configure_systemd_resolved(interface, servers) {
+    match configure_systemd_resolved(interface, servers, search_domains) {
         Ok(guard) => return Ok(guard),
         Err(err) => errors.push(err),
     }
 
-    match configure_resolvconf(interface, servers) {
+    match configure_resolvconf(interface, servers, search_domains) {
         Ok(guard) => return Ok(guard),
         Err(err) => errors.push(err),
     }
@@ -210,19 +217,19 @@ fn configure_linux_dns(interface: &str, servers: &[Ipv4Addr]) -> Result<LinuxDns
 fn configure_systemd_resolved(
     interface: &str,
     servers: &[Ipv4Addr],
+    search_domains: &[String],
 ) -> std::result::Result<LinuxDnsGuard, String> {
     let server_args = servers.iter().map(ToString::to_string).collect::<Vec<_>>();
     let mut dns_args = vec!["dns".to_string(), interface.to_string()];
     dns_args.extend(server_args);
     run_command_status("resolvectl", &dns_args)?;
-    if let Err(err) = run_command_status(
-        "resolvectl",
-        &[
-            "domain".to_string(),
-            interface.to_string(),
-            "~.".to_string(),
-        ],
-    ) {
+    let mut domain_args = vec!["domain".to_string(), interface.to_string()];
+    domain_args.extend(
+        dns_search_domain_values(search_domains)
+            .into_iter()
+            .map(|domain| format!("~{domain}")),
+    );
+    if let Err(err) = run_command_status("resolvectl", &domain_args) {
         let _ = run_command_status("resolvectl", &["revert".to_string(), interface.to_string()]);
         return Err(err);
     }
@@ -238,9 +245,10 @@ fn configure_systemd_resolved(
 fn configure_resolvconf(
     interface: &str,
     servers: &[Ipv4Addr],
+    search_domains: &[String],
 ) -> std::result::Result<LinuxDnsGuard, String> {
     let key = format!("{interface}.awsvpn");
-    let config = render_resolvconf_config(servers);
+    let config = render_resolvconf_config(servers, search_domains);
     run_command_with_stdin("resolvconf", &["-a", key.as_str()], &config)?;
 
     Ok(LinuxDnsGuard {
@@ -298,9 +306,19 @@ fn parse_linux_interface_for_ipv4(output: &str, addr: Ipv4Addr) -> Option<String
     None
 }
 
+fn dns_search_domain_values(search_domains: &[String]) -> Vec<String> {
+    if search_domains.is_empty() {
+        vec!["openvpn".to_string()]
+    } else {
+        search_domains.to_vec()
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
-fn render_resolvconf_config(servers: &[Ipv4Addr]) -> String {
-    let mut config = String::from("search openvpn\n");
+fn render_resolvconf_config(servers: &[Ipv4Addr], search_domains: &[String]) -> String {
+    let mut config = String::from("search ");
+    config.push_str(&dns_search_domain_values(search_domains).join(" "));
+    config.push('\n');
     for server in servers {
         config.push_str("nameserver ");
         config.push_str(&server.to_string());
@@ -412,14 +430,30 @@ mod tests {
 
     #[test]
     fn renders_resolvconf_config() {
-        let config = render_resolvconf_config(&[
-            "192.0.2.53".parse().unwrap(),
-            "198.51.100.53".parse().unwrap(),
-        ]);
+        let config = render_resolvconf_config(
+            &[
+                "192.0.2.53".parse().unwrap(),
+                "198.51.100.53".parse().unwrap(),
+            ],
+            &[],
+        );
 
         assert_eq!(
             config,
             "search openvpn\nnameserver 192.0.2.53\nnameserver 198.51.100.53\n"
+        );
+    }
+
+    #[test]
+    fn renders_resolvconf_config_with_explicit_search_domains() {
+        let config = render_resolvconf_config(
+            &["192.0.2.53".parse().unwrap()],
+            &["zebedee.io".to_string(), "internal.example".to_string()],
+        );
+
+        assert_eq!(
+            config,
+            "search zebedee.io internal.example\nnameserver 192.0.2.53\n"
         );
     }
 

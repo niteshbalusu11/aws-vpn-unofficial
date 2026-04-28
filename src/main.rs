@@ -4,7 +4,7 @@ use awsvpn::daemon::{
 };
 use awsvpn::{
     BrowserMode, ConnectOptions, Diagnostics, DnsMode, Error, LogLevel, RouteMode, VpnClient,
-    VpnEvent, collect_diagnostics,
+    VpnEvent, collect_diagnostics, validate_dns_search_domain,
 };
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
@@ -18,6 +18,7 @@ use tokio::time;
 use tracing::Level;
 
 const DEFAULT_CONFIG_RELATIVE_PATH: &str = ".awsvpnunofficial/vpnconfig.ovpn";
+const DEFAULT_DNS_DOMAINS_RELATIVE_PATH: &str = ".awsvpnunofficial/dns-domains";
 #[cfg(unix)]
 const DAEMON_READY_LINE: &str = "__AWSVPN_DAEMON_READY__";
 #[cfg(unix)]
@@ -74,6 +75,13 @@ struct ConnectArgs {
 
     #[arg(long, default_value = "openvpn", value_parser = parse_dns_mode)]
     dns: DnsMode,
+
+    #[arg(
+        long = "dns-domain",
+        value_parser = parse_dns_domain,
+        help = "Route DNS lookups for this domain suffix to VPN DNS; repeat for multiple internal domains"
+    )]
+    dns_domains: Vec<String>,
 
     #[arg(
         long,
@@ -152,6 +160,10 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
 
 fn connect_options(args: &ConnectArgs) -> ConnectOptions {
     let config = args.config.clone().unwrap_or_else(default_config_path);
+    let dns_domains = default_dns_domains()
+        .into_iter()
+        .chain(args.dns_domains.clone())
+        .collect::<Vec<_>>();
     let browser_mode = if args.no_browser {
         BrowserMode::Disabled
     } else if let Some(browser) = args.browser {
@@ -169,6 +181,7 @@ fn connect_options(args: &ConnectArgs) -> ConnectOptions {
         .with_browser_mode(browser_mode)
         .with_print_login_url(args.print_login_url)
         .with_dns_mode(args.dns)
+        .with_dns_search_domains(dns_domains)
         .with_route_mode(if args.no_pushed_routes {
             RouteMode::IgnorePushedRoutes
         } else if args.no_default_route {
@@ -533,6 +546,10 @@ fn connect_args_for_child(args: &ConnectArgs) -> Vec<String> {
     if args.no_pushed_routes {
         values.push("--no-pushed-routes".to_string());
     }
+    for domain in &args.dns_domains {
+        values.push("--dns-domain".to_string());
+        values.push(domain.clone());
+    }
     values.push("--dns".to_string());
     values.push(format_dns_mode(args.dns).to_string());
 
@@ -543,6 +560,26 @@ fn default_config_path() -> PathBuf {
     default_config_home()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DEFAULT_CONFIG_RELATIVE_PATH)
+}
+
+fn default_dns_domains_path() -> PathBuf {
+    default_config_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(DEFAULT_DNS_DOMAINS_RELATIVE_PATH)
+}
+
+fn default_dns_domains() -> Vec<String> {
+    let path = default_dns_domains_path();
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn default_config_home() -> Option<PathBuf> {
@@ -580,6 +617,15 @@ fn parse_dns_mode(value: &str) -> Result<DnsMode, String> {
         "openvpn" => Ok(DnsMode::OpenVpnDefault),
         "disabled" => Ok(DnsMode::Disabled),
         _ => Err("expected one of: openvpn, disabled".to_string()),
+    }
+}
+
+fn parse_dns_domain(value: &str) -> Result<String, String> {
+    let normalized = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    if validate_dns_search_domain(&normalized) {
+        Ok(normalized)
+    } else {
+        Err("expected a DNS domain suffix such as internal.example.com".to_string())
     }
 }
 

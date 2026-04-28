@@ -2,6 +2,7 @@
 set -eu
 
 STATE_ROOT="State:/Network/awsvpn"
+DNS_SERVICE_KEY="com.amazonaws.acvc"
 
 log() {
   printf '%s\n' "awsvpn client.down: $*" >&2
@@ -43,6 +44,7 @@ flush_dns_cache() {
 
 cleanup_state() {
   /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
 remove $STATE_ROOT/OldDNSSetup
 remove $STATE_ROOT/OldDNSState
 remove $STATE_ROOT

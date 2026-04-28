@@ -2,6 +2,7 @@
 set -eu
 
 STATE_ROOT="State:/Network/awsvpn"
+DNS_SERVICE_KEY="com.amazonaws.acvc"
 DEFAULT_DOMAIN="${AWSVPN_DEFAULT_DOMAIN:-openvpn}"
 
 log() {
@@ -12,48 +13,6 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     log "missing required command: $1"
     exit 1
-  fi
-}
-
-primary_service_id() {
-  /usr/sbin/scutil <<'EOF' | awk '/PrimaryService[[:space:]]*:/ { print $3; exit }'
-show State:/Network/Global/IPv4
-EOF
-}
-
-scutil_key_exists() {
-  key="$1"
-  output="$(/usr/sbin/scutil <<EOF 2>&1
-show $key
-EOF
-)"
-  ! printf '%s\n' "$output" | grep -q "No such key"
-}
-
-save_existing_dns() {
-  psid="$1"
-
-  /usr/sbin/scutil <<EOF >/dev/null
-remove $STATE_ROOT/OldDNSState
-remove $STATE_ROOT
-EOF
-
-  if scutil_key_exists "State:/Network/Service/$psid/DNS"; then
-    /usr/sbin/scutil <<EOF >/dev/null
-get State:/Network/Service/$psid/DNS
-set $STATE_ROOT/OldDNSState
-d.init
-d.add PrimaryService $psid
-d.add HadDNS 1
-set $STATE_ROOT
-EOF
-  else
-    /usr/sbin/scutil <<EOF >/dev/null
-d.init
-d.add PrimaryService $psid
-d.add HadDNS 0
-set $STATE_ROOT
-EOF
   fi
 }
 
@@ -76,6 +35,53 @@ add_unique_word() {
     *" $word "*) printf '%s' "$list" ;;
     *) printf '%s' "${list:+$list }$word" ;;
   esac
+}
+
+is_valid_dns_server() {
+  case "$1" in
+    ""|*[!0123456789abcdefABCDEF:.]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+is_valid_domain() {
+  domain="$1"
+  [ -n "$domain" ] || return 1
+  [ "${#domain}" -le 253 ] || return 1
+  case "$domain" in
+    .*|*.|*..*|-*|*-) return 1 ;;
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-]*) return 1 ;;
+  esac
+
+  old_ifs="$IFS"
+  IFS=.
+  for label in $domain; do
+    [ -n "$label" ] || return 1
+    [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+  IFS="$old_ifs"
+  return 0
+}
+
+validate_dns_servers() {
+  for server in $dns_servers; do
+    if ! is_valid_dns_server "$server"; then
+      log "invalid pushed DNS server; refusing to modify DNS"
+      exit 1
+    fi
+  done
+}
+
+validate_search_domains() {
+  for domain in $search_domains; do
+    if ! is_valid_domain "$domain"; then
+      log "invalid DNS search domain; refusing to modify DNS"
+      exit 1
+    fi
+  done
 }
 
 collect_openvpn_dns_options() {
@@ -122,19 +128,27 @@ collect_openvpn_dns_options() {
     search_domains="$domain_name"
   fi
 
+  for value in ${AWSVPN_SEARCH_DOMAINS:-}; do
+    search_domains="$(add_unique_word "$search_domains" "$value")"
+  done
+
+  validate_dns_servers
+  validate_search_domains
+
   export dns_servers search_domains domain_name
 }
 
 apply_dns() {
-  psid="$1"
-
   /usr/sbin/scutil <<EOF >/dev/null
+remove State:/Network/Service/$DNS_SERVICE_KEY/DNS
+remove $STATE_ROOT
 d.init
 d.add ServerAddresses * $dns_servers
 d.add SupplementalMatchDomains * $search_domains
-d.add SearchDomains * $search_domains
-d.add DomainName $domain_name
-set State:/Network/Service/$psid/DNS
+set State:/Network/Service/$DNS_SERVICE_KEY/DNS
+d.init
+d.add Active 1
+set $STATE_ROOT
 EOF
 }
 
@@ -145,14 +159,7 @@ if ! collect_openvpn_dns_options; then
   exit 0
 fi
 
-psid="$(primary_service_id)"
-if [ -z "$psid" ]; then
-  log "could not determine primary network service"
-  exit 1
-fi
-
-save_existing_dns "$psid"
-apply_dns "$psid"
+apply_dns
 flush_dns_cache
 
-log "configured scoped DNS servers [$dns_servers] for domains [$search_domains] on primary service $psid"
+log "configured scoped DNS servers [$dns_servers] for domains [$search_domains]"

@@ -24,6 +24,7 @@ pub struct OpenVpnLaunchOptions {
     pub management_host: IpAddr,
     pub management_port: Option<u16>,
     pub configure_dns: bool,
+    pub dns_search_domains: Vec<String>,
     pub ignore_default_route: bool,
     pub ignore_pushed_routes: bool,
 }
@@ -130,7 +131,7 @@ impl OpenVpnPrepared {
             .parent()
             .unwrap_or_else(|| Path::new("."));
 
-        vec![
+        let mut args = vec![
             "--script-security".to_string(),
             "2".to_string(),
             "--setenv".to_string(),
@@ -144,11 +145,24 @@ impl OpenVpnPrepared {
                 .and_then(|value| value.to_str())
                 .unwrap_or("awsvpn")
                 .to_string(),
+        ];
+
+        if !self.options.dns_search_domains.is_empty() {
+            args.extend([
+                "--setenv".to_string(),
+                "AWSVPN_SEARCH_DOMAINS".to_string(),
+                self.options.dns_search_domains.join(" "),
+            ]);
+        }
+
+        args.extend([
             "--up".to_string(),
             dns_scripts.up.display().to_string(),
             "--down".to_string(),
             dns_scripts.down.display().to_string(),
-        ]
+        ]);
+
+        args
     }
 
     pub async fn spawn(
@@ -444,6 +458,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             management_port: Some(47000),
             configure_dns: true,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -460,6 +475,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -512,6 +528,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -557,6 +574,36 @@ mod tests {
     }
 
     #[test]
+    fn passes_explicit_dns_search_domains_to_dns_scripts() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let openvpn_dir = tempdir.path().join("openvpn");
+        fs::create_dir(&openvpn_dir).unwrap();
+        let binary = openvpn_dir.join("acvc-openvpn");
+        fs::write(&binary, "").unwrap();
+        fs::write(openvpn_dir.join("client.up"), "").unwrap();
+        fs::write(openvpn_dir.join("client.down"), "").unwrap();
+
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary,
+            config: PathBuf::from("/tmp/client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: true,
+            dns_search_domains: vec!["zebedee.io".to_string(), "internal.example".to_string()],
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
+        })
+        .unwrap();
+
+        assert!(prepared.args().windows(3).any(|window| window
+            == [
+                "--setenv",
+                "AWSVPN_SEARCH_DOMAINS",
+                "zebedee.io internal.example"
+            ]));
+    }
+
+    #[test]
     fn dns_script_symlinks_resolve_relative_openvpn_path() {
         let tempdir = tempfile::tempdir().unwrap();
         let openvpn_dir = tempdir.path().join("openvpn");
@@ -574,6 +621,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -607,6 +655,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -626,6 +675,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            dns_search_domains: Vec::new(),
             ignore_default_route: true,
             ignore_pushed_routes: false,
         })
@@ -647,6 +697,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: true,
         })
@@ -669,6 +720,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })
@@ -688,6 +740,7 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47001),
             configure_dns: true,
+            dns_search_domains: Vec::new(),
             ignore_default_route: false,
             ignore_pushed_routes: false,
         })

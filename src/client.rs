@@ -25,6 +25,35 @@ pub enum DnsMode {
     Disabled,
 }
 
+pub fn validate_dns_search_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+
+    let domain = domain.trim_end_matches('.');
+    if domain.is_empty()
+        || domain.contains("..")
+        || domain
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-' && byte != b'.')
+    {
+        return false;
+    }
+
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && label
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteMode {
     OpenVpnDefault,
@@ -50,6 +79,7 @@ pub struct ConnectOptions {
     pub browser: BrowserMode,
     pub log_level: LogLevel,
     pub dns_mode: DnsMode,
+    pub dns_search_domains: Vec<String>,
     pub route_mode: RouteMode,
     pub print_login_url: bool,
     pub event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
@@ -68,6 +98,7 @@ impl ConnectOptions {
             browser: BrowserMode::System,
             log_level: LogLevel::Info,
             dns_mode: DnsMode::OpenVpnDefault,
+            dns_search_domains: Vec::new(),
             route_mode: RouteMode::OpenVpnDefault,
             print_login_url: false,
             event_tx: None,
@@ -101,6 +132,17 @@ impl ConnectOptions {
 
     pub fn with_dns_mode(mut self, dns_mode: DnsMode) -> Self {
         self.dns_mode = dns_mode;
+        self
+    }
+
+    pub fn with_dns_search_domains(mut self, domains: Vec<String>) -> Self {
+        self.dns_search_domains.clear();
+        for domain in domains {
+            let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !self.dns_search_domains.contains(&domain) {
+                self.dns_search_domains.push(domain);
+            }
+        }
         self
     }
 
@@ -155,6 +197,14 @@ impl ConnectOptions {
             ));
         }
 
+        for domain in &self.dns_search_domains {
+            if !validate_dns_search_domain(domain) {
+                return Err(Error::InvalidConfig(format!(
+                    "invalid DNS search domain: {domain}"
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -201,6 +251,7 @@ impl VpnClient {
             management_host: options.management_host,
             management_port: options.management_port,
             configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault),
+            dns_search_domains: options.dns_search_domains.clone(),
             ignore_default_route: matches!(options.route_mode, RouteMode::IgnoreDefaultRoute),
             ignore_pushed_routes: matches!(options.route_mode, RouteMode::IgnorePushedRoutes),
         })?;
@@ -253,7 +304,11 @@ impl VpnClient {
                     None
                 } else {
                     tracing::info!(dns_servers = ?outcome.dns_servers, "configuring native DNS");
-                    configure_native_dns(&outcome.dns_servers, outcome.vpn_ip)?
+                    configure_native_dns(
+                        &outcome.dns_servers,
+                        outcome.vpn_ip,
+                        &options.dns_search_domains,
+                    )?
                 }
             } else {
                 None
@@ -348,5 +403,25 @@ impl VpnSession {
             dns_guard.restore()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_dns_search_domains() {
+        assert!(validate_dns_search_domain("zebedee.io"));
+        assert!(validate_dns_search_domain(
+            "internal-grafana.example-ops.local"
+        ));
+
+        assert!(!validate_dns_search_domain(""));
+        assert!(!validate_dns_search_domain("-zebedee.io"));
+        assert!(!validate_dns_search_domain("zebedee..io"));
+        assert!(!validate_dns_search_domain(
+            "zebedee.io;set State:/Network/pwn"
+        ));
     }
 }
