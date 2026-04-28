@@ -34,10 +34,8 @@ async fn main() {
 
     if let Err(err) = run(cli).await {
         eprintln!("error: {err}");
-        if matches!(err, Error::OpenVpnProcessNotImplemented) {
-            eprintln!(
-                "hint: the library/CLI skeleton is in place; OpenVPN process orchestration is the next implementation milestone"
-            );
+        if matches!(err, Error::OpenVpnNotFound) {
+            eprintln!("hint: pass the AWS-patched OpenVPN binary with --openvpn <path>");
         }
         std::process::exit(1);
     }

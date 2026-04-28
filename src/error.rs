@@ -14,6 +14,15 @@ pub enum Error {
     #[error("OpenVPN process support is not implemented yet")]
     OpenVpnProcessNotImplemented,
 
+    #[error("could not start OpenVPN: {0}")]
+    OpenVpnSpawnFailed(std::io::Error),
+
+    #[error("OpenVPN process failed: {0}")]
+    OpenVpnProcess(std::io::Error),
+
+    #[error("could not create secure temporary file: {0}")]
+    TempFile(std::io::Error),
+
     #[error("management protocol error: {0}")]
     ManagementProtocol(String),
 

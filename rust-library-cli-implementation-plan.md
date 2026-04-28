@@ -498,15 +498,15 @@ Do not base the final packaged binary on the older `samm-git` OpenVPN 2.5.x patc
 ### OpenVPN Process
 
 - [ ] Locate OpenVPN binary.
-- [ ] Create temp work directory.
-- [ ] Generate management password.
-- [ ] Write management password file with `0600` permissions.
-- [ ] Spawn OpenVPN with management arguments.
+- [x] Create temp work directory.
+- [x] Generate management password.
+- [x] Write management password file with `0600` permissions.
+- [x] Spawn OpenVPN with management arguments.
 - [ ] Pipe stdout/stderr into sanitized event/log stream.
-- [ ] Track process ID.
-- [ ] Implement graceful shutdown.
-- [ ] Kill child only after graceful shutdown timeout.
-- [ ] Delete temp files on drop.
+- [x] Track process ID.
+- [x] Implement graceful shutdown.
+- [x] Kill child only after graceful shutdown timeout.
+- [x] Delete temp files on drop.
 
 OpenVPN args for MVP:
 
@@ -521,18 +521,18 @@ OpenVPN args for MVP:
 
 ### Management Client
 
-- [ ] Connect to management TCP socket.
-- [ ] Handle management password prompt if emitted.
-- [ ] Send `state on`.
-- [ ] Send `log on`.
-- [ ] Send `echo on`.
-- [ ] Send `hold release`.
-- [ ] Implement line-based reader.
-- [ ] Implement command writer with safe quoting.
-- [ ] Support `username "Auth" ...`.
-- [ ] Support `password "Auth" ...`.
-- [ ] Support `signal SIGTERM`.
-- [ ] Support `quit`.
+- [x] Connect to management TCP socket.
+- [x] Handle management password prompt if emitted.
+- [x] Send `state on`.
+- [x] Send `log on`.
+- [x] Send `echo on`.
+- [x] Send `hold release`.
+- [x] Implement line-based reader.
+- [x] Implement command writer with safe quoting.
+- [x] Support `username "Auth" ...`.
+- [x] Support `password "Auth" ...`.
+- [x] Support `signal SIGTERM`.
+- [x] Support `quit`.
 - [ ] Add reconnect/error handling for management socket close.
 
 ### Management Parser
@@ -661,11 +661,11 @@ Goal: make the risky string-handling parts testable before process orchestration
 
 TODO:
 
-- [ ] Implement management parser.
-- [ ] Implement CRV1 extraction.
-- [ ] Implement URL validation.
-- [ ] Implement redaction.
-- [ ] Add fixtures.
+- [x] Implement management parser.
+- [x] Implement CRV1 extraction.
+- [x] Implement URL validation.
+- [x] Implement redaction.
+- [x] Add fixtures.
 
 Acceptance:
 
@@ -678,11 +678,11 @@ Goal: receive SAML responses safely.
 
 TODO:
 
-- [ ] Implement localhost-only ACS server.
-- [ ] Implement one-shot assertion delivery.
-- [ ] Implement timeout.
-- [ ] Implement browser opener.
-- [ ] Add browser-disabled mode for tests.
+- [x] Implement localhost-only ACS server.
+- [x] Implement one-shot assertion delivery.
+- [x] Implement timeout.
+- [x] Implement browser opener.
+- [x] Add browser-disabled mode for tests.
 
 Acceptance:
 
@@ -712,11 +712,11 @@ Goal: start and control a patched OpenVPN binary.
 
 TODO:
 
-- [ ] Implement process spawning.
-- [ ] Implement management port selection.
-- [ ] Implement secure temp files.
-- [ ] Implement graceful shutdown.
-- [ ] Add `--openvpn` flag.
+- [x] Implement process spawning.
+- [x] Implement management port selection.
+- [x] Implement secure temp files.
+- [x] Implement graceful shutdown.
+- [x] Add `--openvpn` flag.
 
 Acceptance:
 

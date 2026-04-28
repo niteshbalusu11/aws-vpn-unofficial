@@ -2,9 +2,11 @@ use crate::openvpn::command::ManagementCommand;
 use crate::openvpn::parser::{ManagementEvent, parse_management_line};
 use crate::{Error, Result};
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::time;
 
 #[derive(Debug)]
 pub struct ManagementClient {
@@ -18,6 +20,23 @@ impl ManagementClient {
             .await
             .map_err(Error::ManagementConnectFailed)?;
         Ok(Self::from_stream(stream))
+    }
+
+    pub async fn connect_with_retry(addr: SocketAddr, timeout: Duration) -> Result<Self> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            match Self::connect(addr).await {
+                Ok(client) => return Ok(client),
+                Err(Error::ManagementConnectFailed(err)) => {
+                    if Instant::now() >= deadline {
+                        return Err(Error::ManagementConnectFailed(err));
+                    }
+                    time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub fn from_stream(stream: TcpStream) -> Self {
@@ -46,6 +65,29 @@ impl ManagementClient {
             .write_all(b"\n")
             .await
             .map_err(Error::ManagementIo)
+    }
+
+    pub async fn authenticate(&mut self, password: &str) -> Result<()> {
+        loop {
+            let Some(line) = self.read_line().await? else {
+                return Err(Error::ManagementProtocol(
+                    "management socket closed during authentication".to_string(),
+                ));
+            };
+
+            if line.starts_with("ENTER PASSWORD:") {
+                self.send_raw_line(password).await?;
+                continue;
+            }
+
+            if line.starts_with("SUCCESS:") {
+                return Ok(());
+            }
+
+            if line.starts_with("ERROR:") {
+                return Err(Error::ManagementProtocol(line));
+            }
+        }
     }
 
     pub async fn read_line(&mut self) -> Result<Option<String>> {
@@ -186,5 +228,43 @@ mod tests {
             server.await.unwrap(),
             vec!["state on", "log on", "echo on", "hold release"]
         );
+    }
+
+    #[tokio::test]
+    async fn authenticates_management_password_prompt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            reader
+                .get_mut()
+                .write_all(b"INFO:OpenVPN Management Interface\n")
+                .await
+                .unwrap();
+            reader
+                .get_mut()
+                .write_all(b"ENTER PASSWORD:\n")
+                .await
+                .unwrap();
+
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"SUCCESS: password is correct\n")
+                .await
+                .unwrap();
+            line.trim_end().to_string()
+        });
+
+        let mut client = ManagementClient::connect(addr).await.unwrap();
+        client
+            .authenticate("secret-management-password")
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), "secret-management-password");
     }
 }

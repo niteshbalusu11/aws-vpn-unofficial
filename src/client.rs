@@ -1,4 +1,8 @@
 use crate::config::OvpnConfigSummary;
+use crate::openvpn::management::ManagementClient;
+use crate::openvpn::process::{OpenVpnLaunchOptions, OpenVpnPrepared, OpenVpnProcess};
+use crate::saml::acs::SamlAcsServer;
+use crate::saml::flow::drive_saml_auth;
 use crate::{Error, ExitReason, Result};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -147,19 +151,62 @@ impl VpnClient {
 
     pub async fn connect(&self, options: ConnectOptions) -> Result<VpnSession> {
         options.validate()?;
-        Err(Error::OpenVpnProcessNotImplemented)
+        let openvpn_binary = options
+            .openvpn_binary
+            .clone()
+            .ok_or(Error::OpenVpnNotFound)?;
+
+        let acs =
+            SamlAcsServer::bind(options.acs_host, options.acs_port, options.auth_timeout).await?;
+
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: openvpn_binary,
+            config: options.config_path.clone(),
+            management_host: options.management_host,
+            management_port: options.management_port,
+        })?;
+
+        let mut openvpn = prepared.spawn().await?;
+        let mut management = ManagementClient::connect_with_retry(
+            openvpn.management_addr(),
+            Duration::from_secs(10),
+        )
+        .await?;
+        management
+            .authenticate(openvpn.management_password())
+            .await?;
+
+        if let Err(err) = drive_saml_auth(&mut management, &acs, options.browser).await {
+            let _ = management.shutdown().await;
+            let _ = openvpn.terminate(Duration::from_secs(3)).await;
+            return Err(err);
+        }
+
+        Ok(VpnSession {
+            openvpn,
+            management: Some(management),
+        })
     }
 }
 
 #[derive(Debug)]
-pub struct VpnSession;
+pub struct VpnSession {
+    openvpn: OpenVpnProcess,
+    management: Option<ManagementClient>,
+}
 
 impl VpnSession {
     pub async fn wait(&mut self) -> Result<ExitReason> {
+        self.openvpn.wait().await?;
         Ok(ExitReason::OpenVpnExited)
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
+        if let Some(management) = &mut self.management {
+            management.shutdown().await?;
+        }
+        self.management = None;
+        self.openvpn.terminate(Duration::from_secs(5)).await?;
         Ok(())
     }
 }
