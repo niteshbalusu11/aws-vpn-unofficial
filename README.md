@@ -17,7 +17,7 @@ somewhere on your `PATH`, and run:
 
 ```bash
 mkdir -p ~/.awsvpnunofficial
-cp ~/.config/AWSVPNClient/OpenVpnConfigs/example ~/.awsvpnunofficial/vpnconfig.ovpn
+cp ~/path/to/your/config/file ~/.awsvpnunofficial/vpnconfig.ovpn
 sudo awsvpn connect
 ```
 
@@ -105,6 +105,16 @@ GitHub Actions builds native self-contained binaries for:
 Each CI job builds `awsvpn` with the runtime from the committed
 `assets/openvpn-runtime/<target>/openvpn` directory embedded in the binary. The
 regular CI workflow does not rebuild OpenVPN on every push.
+
+To publish a release, push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds all four binaries, creates a GitHub Release, and
+uploads `.tar.gz` archives plus SHA-256 checksum files.
 
 ## Licensing
 
