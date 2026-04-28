@@ -204,6 +204,10 @@ impl OpenVpnProcess {
         self.child.wait().await.map_err(Error::OpenVpnProcess)
     }
 
+    pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait().map_err(Error::OpenVpnProcess)
+    }
+
     pub async fn terminate(&mut self, timeout: Duration) -> Result<()> {
         if let Ok(Some(_)) = self.child.try_wait() {
             self.abort_log_tasks();

@@ -251,6 +251,7 @@ impl VpnClient {
             management: Some(management),
             event_rx: options.event_tx.is_none().then_some(event_rx),
             dns_guard,
+            vpn_ip: outcome.vpn_ip,
             _runtime_deployment: runtime_deployment,
         })
     }
@@ -262,12 +263,17 @@ pub struct VpnSession {
     management: Option<ManagementClient>,
     event_rx: Option<mpsc::UnboundedReceiver<VpnEvent>>,
     dns_guard: Option<NativeDnsGuard>,
+    vpn_ip: Option<IpAddr>,
     _runtime_deployment: RuntimeDeployment,
 }
 
 impl VpnSession {
     pub fn pid(&self) -> Option<u32> {
         self.openvpn.pid()
+    }
+
+    pub fn vpn_ip(&self) -> Option<IpAddr> {
+        self.vpn_ip
     }
 
     pub fn take_event_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<VpnEvent>> {
@@ -280,6 +286,15 @@ impl VpnSession {
         result?;
         restore_result?;
         Ok(ExitReason::OpenVpnExited)
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitReason>> {
+        let Some(_status) = self.openvpn.try_wait()? else {
+            return Ok(None);
+        };
+
+        self.restore_dns()?;
+        Ok(Some(ExitReason::OpenVpnExited))
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {

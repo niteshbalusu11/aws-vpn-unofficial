@@ -63,6 +63,7 @@ name = "aws-vpn-unofficial"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "rand",
  "tempfile",
  "thiserror",

@@ -5,6 +5,8 @@
 
 mod client;
 pub mod config;
+#[cfg(unix)]
+pub mod daemon;
 pub mod diagnose;
 mod dns;
 mod error;

@@ -71,6 +71,12 @@ pub enum Error {
     #[error("DNS configuration failed: {0}")]
     DnsConfigurationFailed(String),
 
+    #[error("daemon control failed: {0}")]
+    DaemonControl(String),
+
+    #[error("daemon is not running")]
+    DaemonUnavailable,
+
     #[error("operation was interrupted")]
     Interrupted,
 }

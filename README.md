@@ -30,6 +30,72 @@ cargo install --path .
 sudo awsvpn connect
 ```
 
+## Commands
+
+Most commands need `sudo` because OpenVPN configures tunnel interfaces, routes,
+and DNS. When run through `sudo`, the default config path still resolves to the
+invoking desktop user's home directory.
+
+Connect with the default config and return after the tunnel is established:
+
+```bash
+sudo awsvpn connect
+```
+
+Connect with an explicit AWS Client VPN config:
+
+```bash
+sudo awsvpn connect ./client-config.ovpn
+```
+
+Show the background session state:
+
+```bash
+sudo awsvpn status
+```
+
+Disconnect the background session and restore DNS:
+
+```bash
+sudo awsvpn disconnect
+```
+
+Keep the VPN attached to the current terminal until Ctrl-C or OpenVPN exits:
+
+```bash
+sudo awsvpn connect --foreground
+```
+
+Print verbose, redacted startup logs:
+
+```bash
+sudo awsvpn connect --debug
+```
+
+Disable automatic browser launch and print the SAML login URL instead:
+
+```bash
+sudo awsvpn connect --no-browser --print-login-url
+```
+
+Skip VPN DNS configuration when another tool manages DNS:
+
+```bash
+sudo awsvpn connect --dns disabled
+```
+
+Use an explicit AWS-patched OpenVPN binary instead of the bundled runtime:
+
+```bash
+sudo awsvpn connect --openvpn /path/to/acvc-openvpn
+```
+
+Run diagnostics after connecting:
+
+```bash
+sudo awsvpn diagnose
+```
+
 ## Connect with the Bundled Runtime
 
 Build as your normal user, then run only the built binary with `sudo`.
@@ -45,6 +111,22 @@ sudo -E target/debug/awsvpn connect --debug
 When no config path is passed, `connect` reads
 `~/.awsvpnunofficial/vpnconfig.ovpn`. When run through `sudo`, the `~` resolves
 to the invoking desktop user, not root.
+
+By default, `connect` runs the VPN session in daemon mode. The command streams
+startup output until the tunnel is connected, then returns control of the
+terminal. Use `status` and `disconnect` to manage the background session:
+
+```bash
+sudo awsvpn status
+sudo awsvpn disconnect
+```
+
+Use `--foreground` when you want the old attached behavior where the shell stays
+occupied until Ctrl-C or OpenVPN exits:
+
+```bash
+sudo awsvpn connect --foreground
+```
 
 By default, the CLI uses the AWS-patched OpenVPN runtime embedded in the Rust
 binary. It extracts that runtime to a private temporary directory for the life
@@ -92,29 +174,6 @@ cargo run -- diagnose
 On macOS, the diagnostic command reports active DNS servers, whether private
 VPN DNS is present, `utun` route count, and whether AWS script logs exist. It
 does not read or print SAML responses, management passwords, or login URLs.
-
-## Release Builds
-
-GitHub Actions builds native self-contained binaries for:
-
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `aarch64-unknown-linux-gnu`
-- `x86_64-unknown-linux-gnu`
-
-Each CI job builds `awsvpn` with the runtime from the committed
-`assets/openvpn-runtime/<target>/openvpn` directory embedded in the binary. The
-regular CI workflow does not rebuild OpenVPN on every push.
-
-To publish a release, push a version tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release workflow builds all four binaries, creates a GitHub Release, and
-uploads `.tar.gz` archives plus SHA-256 checksum files.
 
 ## Licensing
 

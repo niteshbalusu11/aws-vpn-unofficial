@@ -333,6 +333,154 @@ CLI responsibilities:
 - Return meaningful exit codes.
 - Keep root-specific messaging understandable.
 
+## Daemon Mode Plan
+
+Goal: allow a user to connect once, return control of the shell after the VPN is
+established, and later disconnect explicitly:
+
+```bash
+sudo awsvpn connect ./client-config.ovpn
+sudo awsvpn status
+sudo awsvpn disconnect
+sudo awsvpn connect --foreground ./client-config.ovpn
+```
+
+This should be implemented as a persistent `awsvpn` controller process, not by
+letting the original CLI process exit while leaving OpenVPN orphaned. The Rust
+process currently owns the OpenVPN child handle, management connection, temporary
+runtime files, temporary management password file, trusted DNS helper script
+links, and DNS restore guard. Those resources must remain owned by a live
+process until disconnect or OpenVPN exit.
+
+### Proposed Architecture
+
+1. `awsvpn connect <config>` starts a background controller process by default.
+2. The controller performs the normal connection flow with `VpnClient::connect`.
+3. The foreground command streams sanitized startup events until either:
+   - the VPN reaches `Connected`, then exits successfully, or
+   - connection fails, then exits with the same error.
+4. The controller keeps the returned `VpnSession` alive.
+5. The controller listens on a local control socket for `status` and
+   `disconnect` commands.
+6. `awsvpn disconnect` connects to the control socket and asks the controller to
+   call `VpnSession::disconnect()`.
+7. If OpenVPN exits unexpectedly, the controller restores DNS, removes its state
+   files, and exits.
+
+### Control Socket
+
+Use a Unix domain socket for macOS/Linux:
+
+```text
+/var/run/awsvpn/<profile-or-config-hash>.sock
+```
+
+or, if privilege/portability makes that awkward during development:
+
+```text
+$XDG_RUNTIME_DIR/awsvpn/<profile-or-config-hash>.sock
+/tmp/awsvpn-<uid>/<profile-or-config-hash>.sock
+```
+
+The first implementation should support one active VPN session per effective
+user. Multi-profile concurrent sessions can be added later once status/state
+naming is proven.
+
+Control protocol should be tiny and structured:
+
+```json
+{"command":"status"}
+{"command":"disconnect"}
+```
+
+Responses:
+
+```json
+{"ok":true,"state":"connected","openvpn_pid":1234,"vpn_ip":"10.0.0.10"}
+{"ok":true,"state":"disconnected"}
+{"ok":false,"error":"not connected"}
+```
+
+Add `serde` / `serde_json` only if the protocol is JSON. If avoiding new
+dependencies is preferred, use a newline-delimited text protocol for the first
+cut, but keep the request/response boundary explicit.
+
+### State Files
+
+The daemon should write a small state file next to the socket:
+
+```text
+pid=<daemon-pid>
+openvpn_pid=<openvpn-pid>
+socket=<socket-path>
+config=<absolute-config-path-or-redacted-name>
+connected_at=<unix-timestamp>
+```
+
+State files are advisory. The authoritative source is whether the socket accepts
+a command and whether the daemon reports a live session. Stale files should be
+cleaned up automatically.
+
+### Security Constraints
+
+- Do not persist the OpenVPN management password.
+- Do not expose the OpenVPN management socket to non-loopback addresses.
+- Do not let `disconnect` talk directly to OpenVPN management.
+- Restrict control socket/state file permissions to the owning user/root.
+- Do not write SAML assertions, management passwords, or private config contents
+  into daemon logs or state files.
+- Keep all OpenVPN config script/plugin rejection behavior unchanged.
+- Ensure daemon logs continue to use the existing redaction path.
+
+### Implementation Notes
+
+- Keep `VpnClient` and `VpnSession` as the core library API.
+- Add a daemon/control layer around `VpnSession` instead of moving foreground
+  CLI signal policy into the library.
+- Reuse `VpnSession::disconnect()` for explicit disconnect.
+- Reuse `VpnSession::wait()` to detect unexpected OpenVPN exit and restore DNS.
+- Consider adding a `VpnSession::status()` snapshot rather than exposing
+  internal fields through the daemon.
+- Add a child-process mode hidden from normal help, for example:
+
+```bash
+awsvpn daemon run --state-dir <path> --config <path> ...
+```
+
+The user-facing `connect` command can spawn that hidden command, wait for a
+"connected" startup notification, then return. `connect --foreground` keeps the
+older terminal-attached lifecycle.
+
+### Daemon Mode TODOs
+
+- [ ] Decide first-cut scope: one active session per user vs named/profiled
+      sessions.
+- [ ] Add CLI flags/commands: daemon-by-default `connect`, `connect
+      --foreground`, `disconnect`, and `status`.
+- [ ] Add internal daemon runner command or module entrypoint.
+- [ ] Add control socket path selection and secure directory creation.
+- [ ] Add stale state/socket cleanup.
+- [ ] Add daemon state file writing and removal.
+- [ ] Add local control protocol request/response types.
+- [ ] Add `status` handling with daemon PID, OpenVPN PID, connection state, and
+      optional VPN IP.
+- [ ] Add `disconnect` handling that calls `VpnSession::disconnect()`.
+- [ ] Make daemon exit when OpenVPN exits unexpectedly.
+- [ ] Make daemon restore DNS on disconnect, OpenVPN exit, SIGTERM, and startup
+      failure after DNS setup.
+- [ ] Stream sanitized connection startup events from daemon child to foreground
+      `connect`.
+- [ ] Return foreground `connect` only after `Connected` or a terminal
+      error.
+- [ ] Reject duplicate daemon connects while an active control socket reports a
+      live session.
+- [ ] Add unit tests for socket path/state-file handling.
+- [ ] Add control protocol tests using a temporary Unix socket.
+- [ ] Add integration-style test with a fake daemon/session command path where
+      practical.
+- [ ] Document daemon mode behavior, privilege expectations, and cleanup
+      recovery.
+
 ## Main Connection Flow
 
 The library connection flow should be:
@@ -617,6 +765,33 @@ Medium term:
 - [x] Add signal handling for Ctrl-C, SIGTERM, and SIGHUP.
 - [x] Map common library errors to actionable CLI messages.
 - [x] Ensure CLI logs are redacted by default.
+- [x] Add daemon-by-default `connect` foreground wrapper.
+- [x] Add `connect --foreground` for attached terminal mode.
+- [x] Add `disconnect` command.
+- [x] Add `status` command.
+- [x] Hide or clearly mark internal daemon runner command.
+- [ ] Make duplicate connect errors understandable.
+- [ ] Make stale daemon state recovery understandable.
+
+### Daemon and Control Plane
+
+- [x] Add `src/daemon.rs` or `src/daemon/` for background session ownership.
+- [x] Add daemon state model for connecting, connected, disconnecting,
+      disconnected, and failed.
+- [x] Add local control socket server.
+- [x] Add local control socket client.
+- [x] Add request/response protocol types.
+- [x] Add secure runtime/state directory creation.
+- [x] Add state file persistence for PID/socket discovery.
+- [x] Add stale state detection and cleanup.
+- [x] Add daemon startup handshake so foreground `connect` can wait
+      until connected.
+- [x] Add daemon shutdown path on explicit disconnect.
+- [x] Add daemon shutdown path on OpenVPN process exit.
+- [x] Add daemon shutdown path on SIGTERM/SIGHUP.
+- [x] Add redacted daemon log/event forwarding during startup.
+- [ ] Add tests for path permissions, stale state handling, and protocol
+      behavior.
 
 ### Config Parsing
 
@@ -643,6 +818,8 @@ Medium term:
 - [x] Delete temp files on drop.
 - [x] Stage trusted DNS helper scripts next to OpenVPN when present.
 - [x] Avoid enabling `--script-security 2` unless trusted helper scripts are staged.
+- [ ] Confirm current `.kill_on_drop(true)` behavior is correct for daemon-owned
+      sessions and cannot kill OpenVPN during foreground process exit.
 
 OpenVPN args for MVP:
 
@@ -743,6 +920,7 @@ OpenVPN args for MVP:
 - [x] Add `awsvpn diagnose` CLI command.
 - [x] Make non-macOS native DNS fallback fail explicitly instead of silently ignoring pushed DNS.
 - [x] Make diagnostics platform-specific; currently implemented on macOS.
+- [ ] Verify daemon disconnect and daemon crash paths restore DNS reliably.
 
 ### Logging and Redaction
 
@@ -753,6 +931,7 @@ OpenVPN args for MVP:
 - [x] Avoid logging management password file content.
 - [ ] Consider redacting SAML login URL by default.
 - [x] Unit test common sensitive line shapes.
+- [ ] Ensure daemon startup logs and state files use the same redaction rules.
 
 ### Tests
 
@@ -945,6 +1124,40 @@ Acceptance:
 - CLI connects on macOS with packaged OpenVPN.
 - DNS/routes restore after disconnect.
 
+### Milestone 10: Daemon Mode
+
+Goal: let users connect in the background and disconnect explicitly.
+
+TODO:
+
+- [ ] Implement daemon state/control module.
+- [ ] Implement secure control socket and state-file discovery.
+- [x] Implement daemon-by-default `awsvpn connect`.
+- [x] Implement `awsvpn connect --foreground`.
+- [x] Implement `awsvpn status`.
+- [x] Implement `awsvpn disconnect`.
+- [x] Stream foreground startup output until connected or failed.
+- [x] Reuse `VpnSession::disconnect()` for daemon disconnect.
+- [x] Reuse `VpnSession::wait()`/`try_wait()` for unexpected OpenVPN exit cleanup.
+- [x] Add duplicate-connect and stale-state handling.
+- [ ] Add unit tests for protocol and state path handling.
+- [ ] Add integration test coverage around daemon lifecycle where practical.
+- [ ] Document daemon mode in `README.md`.
+
+Acceptance:
+
+- `sudo awsvpn connect ./client-config.ovpn` returns only after
+  `CONNECTED,SUCCESS`.
+- `sudo awsvpn status` reports the live daemon/OpenVPN session without exposing
+  secrets.
+- `sudo awsvpn disconnect` terminates OpenVPN and restores DNS.
+- Duplicate daemon connects fail cleanly while a session is active.
+- Stale socket/state files do not block a new connection.
+- Ctrl-C during daemon startup cancels startup and cleans up.
+- Daemon SIGTERM disconnects OpenVPN and restores DNS.
+- Tests prove the control protocol never requires storing the OpenVPN management
+  password on disk.
+
 ## Open Questions
 
 Resolved:
@@ -966,9 +1179,12 @@ Still open:
 
 ## Immediate Next Steps
 
-1. Commit the organized runtime assets and workflow split.
-2. Re-run the PR CI and confirm the package crate job passes with committed assets.
-3. Test Linux DNS on Fedora, Arch, Debian/Ubuntu, and NixOS.
+1. Continue real daemon validation on Linux.
+2. Add lifecycle tests for duplicate connects, stale state cleanup, and
+   disconnect-triggered DNS/session cleanup.
+3. Continue Linux DNS testing on Fedora, Arch, Debian/Ubuntu, and NixOS.
 4. Add release archive layout tests for the self-contained binary path.
-5. Add runtime-source logging so debug output clearly shows whether bundled or external OpenVPN is being used.
-6. Add distro documentation for privileges, DNS modes, and unsupported Linux setups.
+5. Add runtime-source logging so debug output clearly shows whether bundled or
+   external OpenVPN is being used.
+6. Add distro documentation for privileges, DNS modes, and unsupported Linux
+    setups.
