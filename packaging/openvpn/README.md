@@ -1,0 +1,78 @@
+# AWS-Compatible OpenVPN Runtime
+
+This directory contains build tooling for the OpenVPN executable that `awsvpn`
+will bundle in self-contained releases.
+
+## Source Strategy
+
+The primary input is AWS's published patched source tarball:
+
+```text
+https://amazon-source-code-downloads.s3.amazonaws.com/aws/clientvpn/openvpn-2.6.12-aws-1.tar.gz
+```
+
+That tarball contains two source trees:
+
+- `openvpn/`
+- `openssl/`
+
+The current script builds bundled OpenSSL first, then builds OpenVPN against
+that OpenSSL and stages this runtime layout:
+
+```text
+target/openvpn-runtime/<target>/openvpn/
+  acvc-openvpn
+  openssl.cnf
+  README.runtime.txt
+```
+
+## Build
+
+Native build:
+
+```bash
+packaging/openvpn/build-openvpn.sh
+```
+
+Target override:
+
+```bash
+TARGET=x86_64-unknown-linux-gnu packaging/openvpn/build-openvpn.sh
+```
+
+Useful overrides:
+
+```text
+SOURCE_URL              AWS source tarball URL
+SOURCE_SHA256           expected tarball checksum, empty disables verification
+TARGET                  runtime target triple
+WORK_DIR                build work directory
+DIST_DIR                staged runtime output directory
+OPENSSL_TARGET          OpenSSL Configure target override
+OPENVPN_CONFIGURE_ARGS  extra OpenVPN ./configure arguments
+JOBS                    make parallelism
+```
+
+## Patch-Based Workflow
+
+The `aws-vpn-client/aws-vpn-client` repository contains extracted patch files
+for OpenVPN 2.6.12 and OpenSSL 3.0.14. Its `extract.sh` script shows how those
+patches are derived from AWS's tarball by diffing against upstream OpenVPN.
+
+We should treat that as an audit/rebase workflow:
+
+1. Download AWS's source tarball.
+2. Diff AWS OpenVPN against upstream OpenVPN tag `v2.6.12`.
+3. Extract any OpenSSL patches from `openvpn/openssl-patches/`.
+4. Review and vendor a small patch queue only if we need to build from pristine
+   upstream OpenVPN/OpenSSL sources.
+
+For now, building directly from the AWS tarball is simpler and more faithful to
+what AWS publishes.
+
+## Current Limitations
+
+- Cross compilation is not fully automated yet.
+- Linux DNS integration is handled by Rust-side follow-up work, not this script.
+- macOS DNS helper scripts still need replacement before we can be fully
+  independent of AWS's app bundle scripts.

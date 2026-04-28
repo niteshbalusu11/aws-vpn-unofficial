@@ -464,6 +464,99 @@ https://amazon-source-code-downloads.s3.amazonaws.com/aws/clientvpn/openvpn-2.6.
 
 Do not base the final packaged binary on the older `samm-git` OpenVPN 2.5.x patch unless we intentionally support a legacy path.
 
+### Self-Contained OpenVPN Packaging Plan
+
+Goal: users should not need the AWS VPN desktop app installed. The released CLI should include, or be able to locate, our own AWS-compatible OpenVPN runtime and platform DNS helpers.
+
+#### Runtime Layout
+
+Use a predictable runtime directory next to the `awsvpn` binary:
+
+```text
+awsvpn
+openvpn/
+  acvc-openvpn
+  client.up        # only where script-based DNS is used
+  client.down      # only where script-based DNS is used
+  openssl.cnf      # if required by the OpenVPN build
+  providers/       # if required by the OpenSSL build
+```
+
+Package managers can also install the runtime under:
+
+```text
+libexec/awsvpn/openvpn/
+```
+
+The Rust runtime resolver should search in this order:
+
+1. `--openvpn <path>`
+2. `AWSVPN_OPENVPN=<path>`
+3. bundled runtime next to the executable
+4. package-manager runtime under `libexec/awsvpn/openvpn`
+5. development-only AWS VPN app fallback, gated so it is never the packaged default
+
+#### Source and Build Strategy
+
+Build our runtime from AWS's published patched OpenVPN source:
+
+```text
+https://amazon-source-code-downloads.s3.amazonaws.com/aws/clientvpn/openvpn-2.6.12-aws-1.tar.gz
+```
+
+Do not rely on the installed AWS VPN app for distribution. Treat the app-bundled binary as a local development fixture only.
+
+The `aws-vpn-client/aws-vpn-client` repository has extracted patch files for
+OpenVPN 2.6.12 and OpenSSL 3.0.14. Its `extract.sh` confirms those patches can
+be regenerated from AWS's source tarball by diffing against upstream OpenVPN.
+Use that patch workflow for auditing and rebasing, but keep the first build
+pipeline tarball-based so we are building exactly what AWS published.
+
+Build outputs needed:
+
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- optionally `x86_64-unknown-linux-musl` after OpenSSL/plugin feasibility is confirmed
+
+#### DNS Strategy
+
+Short term:
+
+- macOS can use script helpers when packaged with the runtime.
+- Linux must get native DNS handling in Rust rather than relying on AWS desktop scripts.
+
+Medium term:
+
+- Implement `DnsMode::SystemdResolved`.
+- Implement `DnsMode::Resolvconf`.
+- Keep `DnsMode::Disabled` for users who manage DNS externally.
+- Keep OpenVPN routes managed by OpenVPN unless a platform requires extra route reconciliation.
+
+#### Packaging TODOs
+
+- [ ] Add `openvpn::runtime` resolver for explicit/env/bundled/package-manager paths.
+- [ ] Make `--openvpn` optional once runtime discovery is implemented.
+- [ ] Add CLI output that logs which OpenVPN runtime source was used.
+- [ ] Add tests for runtime discovery ordering.
+- [x] Add `packaging/openvpn/README.md` with source URL, build prerequisites, and expected artifact layout.
+- [x] Add `packaging/openvpn/build-openvpn.sh` skeleton for local and CI builds.
+- [ ] Add optional patch-regeneration script based on the `aws-vpn-client/aws-vpn-client` `extract.sh` workflow.
+- [ ] Add checksum recording for downloaded OpenVPN source tarballs.
+- [ ] Decide whether to vendor source tarballs, download in CI, or use release assets only.
+- [ ] Build Linux amd64 AWS-patched OpenVPN artifact.
+- [ ] Build Linux arm64 AWS-patched OpenVPN artifact.
+- [ ] Build macOS amd64 AWS-patched OpenVPN artifact.
+- [ ] Build macOS arm64 AWS-patched OpenVPN artifact.
+- [ ] Package DNS helper scripts only after license review.
+- [ ] Replace macOS AWS script dependency with our own script or direct Rust `scutil` implementation.
+- [ ] Implement Linux DNS through `systemd-resolved`.
+- [ ] Implement Linux DNS through `resolvconf`.
+- [ ] Add release archive layout tests.
+- [ ] Add CI matrix that verifies `awsvpn connect --dry-run-runtime` can find bundled OpenVPN.
+- [ ] Document unsupported distros and required privileges.
+
 ## Module TODOs
 
 ### Library Root

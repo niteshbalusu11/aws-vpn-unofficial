@@ -124,8 +124,8 @@ resolver #2
         assert_eq!(
             parse_dns_servers(output),
             vec![
-                "172.31.0.2".parse().unwrap(),
-                "170.250.249.249".parse().unwrap()
+                "172.31.0.2".parse::<Ipv4Addr>().unwrap(),
+                "170.250.249.249".parse::<Ipv4Addr>().unwrap()
             ]
         );
     }
