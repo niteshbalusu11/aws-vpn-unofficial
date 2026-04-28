@@ -105,11 +105,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notes="Self-contained awsvpn binaries for Linux and macOS.
+          notes="$(cat <<'NOTES'
+          Self-contained awsvpn binaries for Linux and macOS.
 
-Download the archive for your platform, extract it, and run:
+          Download the archive for your platform, extract it, and run:
 
-  sudo ./awsvpn connect /path/to/client-config.ovpn"
+            sudo ./awsvpn connect /path/to/client-config.ovpn
+          NOTES
+          )"
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" dist/* --clobber
