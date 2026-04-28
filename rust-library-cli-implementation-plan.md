@@ -18,7 +18,7 @@ Completed so far:
   - `aarch64-unknown-linux-gnu`
   - `x86_64-unknown-linux-gnu`
 - macOS DNS is handled by original bundled `client.up` / `client.down` scripts, with Rust fallback for pushed DNS when scripts are absent.
-- Linux OpenVPN runtimes are packaged, but Linux DNS integration is still pending.
+- Linux OpenVPN runtimes are packaged, and native Linux DNS integration is implemented for `systemd-resolved` with `resolvconf` fallback; distro-level real VPN testing is still pending.
 - CI is split into regular CI and a manual runtime-refresh workflow:
   - regular CI validates committed runtime assets and builds self-contained binaries,
   - `Build OpenVPN Runtime Assets` is manual-only and rebuilds raw OpenVPN runtime assets when the source version changes.
@@ -584,8 +584,8 @@ Medium term:
 - [x] Add committed runtime asset validation script.
 - [x] Add GPL-2.0-only license and third-party notices.
 - [ ] Add optional patch-regeneration script based on the `aws-vpn-client/aws-vpn-client` `extract.sh` workflow.
-- [ ] Implement Linux DNS through `systemd-resolved`.
-- [ ] Implement Linux DNS through `resolvconf`.
+- [x] Implement Linux DNS through `systemd-resolved`.
+- [x] Implement Linux DNS through `resolvconf`.
 - [ ] Add release archive layout tests.
 - [ ] Document unsupported distros and required privileges.
 - [ ] Add CLI output that logs which OpenVPN runtime source was used without exposing sensitive paths in normal mode.
@@ -733,8 +733,8 @@ OpenVPN args for MVP:
 
 - [x] For MVP, let OpenVPN manage routes.
 - [x] Document DNS limitations clearly.
-- [ ] Add Linux `systemd-resolved` support.
-- [ ] Add Linux `resolvconf` support.
+- [x] Add Linux `systemd-resolved` support.
+- [x] Add Linux `resolvconf` support.
 - [ ] Add NixOS-specific notes or mode.
 - [x] Add macOS DNS setup via scripts or direct `scutil`.
 - [x] Ensure disconnect restores DNS.
@@ -898,8 +898,8 @@ TODO:
 - [x] Build AWS-patched OpenVPN for Linux amd64.
 - [x] Build AWS-patched OpenVPN for Linux arm64.
 - [x] Add packaging layout.
-- [ ] Add DNS support for `systemd-resolved`.
-- [ ] Add DNS support for `resolvconf`.
+- [x] Add DNS support for `systemd-resolved`.
+- [x] Add DNS support for `resolvconf`.
 - [ ] Test Fedora.
 - [ ] Test Arch.
 - [ ] Test Debian/Ubuntu.
@@ -960,16 +960,15 @@ Resolved:
 Still open:
 
 1. Should profile management live in the core library or a separate optional feature?
-2. What should the default Linux DNS strategy be when both `systemd-resolved` and `resolvconf` are available?
-3. Should we support alternate ACS ports experimentally, or hard-code `35001` for AWS compatibility?
-4. Should SAML assertions be explicitly zeroized after management handoff?
-5. Should the SAML login URL be redacted by default in debug logs even before authentication?
+2. Should we support alternate ACS ports experimentally, or hard-code `35001` for AWS compatibility?
+3. Should SAML assertions be explicitly zeroized after management handoff?
+4. Should the SAML login URL be redacted by default in debug logs even before authentication?
 
 ## Immediate Next Steps
 
 1. Commit the organized runtime assets and workflow split.
 2. Re-run the PR CI and confirm the package crate job passes with committed assets.
-3. Implement Linux DNS, starting with `systemd-resolved` and falling back to `resolvconf`.
+3. Test Linux DNS on Fedora, Arch, Debian/Ubuntu, and NixOS.
 4. Add release archive layout tests for the self-contained binary path.
 5. Add runtime-source logging so debug output clearly shows whether bundled or external OpenVPN is being used.
 6. Add distro documentation for privileges, DNS modes, and unsupported Linux setups.

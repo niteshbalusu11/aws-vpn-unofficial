@@ -237,7 +237,7 @@ impl VpnClient {
                     None
                 } else {
                     tracing::info!(dns_servers = ?outcome.dns_servers, "configuring native DNS");
-                    configure_native_dns(&outcome.dns_servers)?
+                    configure_native_dns(&outcome.dns_servers, outcome.vpn_ip)?
                 }
             } else {
                 None
