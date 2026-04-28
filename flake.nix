@@ -1,8 +1,10 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.rust-overlay = {
-    url = "github:oxalica/rust-overlay";
-    inputs.nixpkgs.follows = "nixpkgs";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -10,6 +12,8 @@
     let
       systems = [
         "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
@@ -23,149 +27,64 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+
           rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-            extensions = [ "rust-src" ];
+            extensions = [
+              "rust-src"
+              "rustfmt"
+            ];
           };
-          linuxRuntimeRpathLibraries = pkgs.lib.optionals pkgs.stdenv.isLinux (
-            with pkgs;
-            [
-              vulkan-loader
-              wayland
-            ]
-          );
-          linuxPackagingRuntimeLibraries = pkgs.lib.optionals pkgs.stdenv.isLinux (
-            with pkgs;
-            [
-              alsa-lib
-              at-spi2-atk
-              atk
-              bzip2
-              cairo
-              cups
-              dbus.lib
-              expat
-              fontconfig
-              glib
-              libcap
-              libdrm
-              libffi
-              libgbm
-              libglvnd
-              libgit2
-              libxkbcommon
-              llvmPackages.libllvm
-              mesa
-              nspr
-              nss
-              openssl
-              pango
-              stdenv.cc.cc.lib
-              udev
-              vulkan-loader
-              wayland
-              libx11
-              libxcomposite
-              libxcursor
-              libxdamage
-              libxext
-              libxfixes
-              libxi
-              libxrandr
-              libxrender
-              libxcb
-              libxshmfence
-              zlib
-              zstd
-            ]
-          );
-          linuxPackagingTools = pkgs.lib.optionals pkgs.stdenv.isLinux (
-            with pkgs;
-            [
-              curl
-              dpkg
-              file
-              rpm
-            ]
-          );
+
+          commonPackages = with pkgs; [
+            autoconf
+            automake
+            bash
+            coreutils
+            curl
+            file
+            git
+            gnumake
+            libtool
+            openssl
+            patch
+            perl
+            pkg-config
+            rustToolchain
+            tokio-console
+          ];
+
+          linuxPackages = pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+            gcc
+            iproute2
+            libcap_ng
+            libnl
+            nettools
+            resolvconf
+            systemd
+          ]);
+
+          darwinPackages = pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs; [
+            darwin.cctools
+          ]);
         in
         {
           default = pkgs.mkShell {
-            name = "hunk-dev-shell";
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [
-              pkgs.dbus.dev
-              pkgs.dbus.lib
-              pkgs.libcap
-            ];
-            packages =
-              with pkgs;
-              [
-                git
-                rustToolchain
-                just
-                zig
-                cmake
-                ninja
-                openssl
-                pkgconf
-              ]
-              ++ lib.optionals stdenv.isLinux [
-                gcc
-                gnumake
-                clang
-                alsa-lib
-                at-spi2-atk
-                atk
-                bzip2
-                cairo
-                cups
-                libcap
-                dbus
-                expat
-                fontconfig
-                libgit2
-                glib
-                libgbm
-                nspr
-                nss
-                pango
-                udev
-                vulkan-loader
-                wayland
-                libx11
-                libxcomposite
-                libxcb
-                libxkbcommon
-                zstd
-                patchelf
-              ]
-              ++ lib.optionals stdenv.isLinux linuxPackagingTools;
+            name = "aws-vpn-unofficial-dev";
+
+            packages = commonPackages ++ linuxPackages ++ darwinPackages;
 
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
-            NIX_LDFLAGS = pkgs.lib.optionalString pkgs.stdenv.isLinux (
-              "-rpath ${pkgs.lib.makeLibraryPath linuxRuntimeRpathLibraries}"
-            );
+
             shellHook = ''
-              if [ -d "$HOME/.cargo/bin" ]; then
-                export PATH="$PATH:$HOME/.cargo/bin"
-              fi
+              export AWSVPN_OPENVPN_SOURCE_URL="https://amazon-source-code-downloads.s3.amazonaws.com/aws/clientvpn/openvpn-2.6.12-aws-1.tar.gz"
 
-              if [ "$(uname -s)" = "Linux" ]; then
-                unset LD_LIBRARY_PATH
-                unset LIBGL_DRIVERS_PATH
-                export HUNK_LINUX_PACKAGING_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxPackagingRuntimeLibraries}"
-                export HUNK_LINUX_HOST_GRAPHICS_LIBRARY_PATHS="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib64"
-                export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$PWD/scripts/run_with_linux_graphics_env.sh"
-              fi
-
-              if [ "$(uname -s)" = "Darwin" ]; then
+              if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1; then
                 sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
-                deployment_target="''${HUNK_MACOSX_DEPLOYMENT_TARGET:-14.0}"
+                deployment_target="''${MACOSX_DEPLOYMENT_TARGET:-14.0}"
                 export SDKROOT="$sdkroot"
                 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
                 export CMAKE_OSX_SYSROOT="$sdkroot"
                 export CMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target"
-                export LIBRARY_PATH="$sdkroot/usr/lib''${LIBRARY_PATH:+:$LIBRARY_PATH}"
-                export CPATH="$sdkroot/usr/include''${CPATH:+:$CPATH}"
                 export CFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CFLAGS:+ $CFLAGS}"
                 export CXXFLAGS="-isysroot $sdkroot -mmacosx-version-min=$deployment_target''${CXXFLAGS:+ $CXXFLAGS}"
                 export LDFLAGS="-L$sdkroot/usr/lib -Wl,-macosx_version_min,$deployment_target''${LDFLAGS:+ $LDFLAGS}"
