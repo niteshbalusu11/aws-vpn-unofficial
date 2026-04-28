@@ -5,6 +5,18 @@ Unofficial Rust library and CLI for AWS Client VPN SAML profiles.
 The crate is library-first. The `awsvpn` binary is a thin wrapper over public
 types such as `VpnClient`, `ConnectOptions`, and `collect_diagnostics`.
 
+## Install
+
+From a published crate:
+
+```bash
+cargo install aws-vpn-unofficial
+sudo awsvpn connect ~/.config/AWSVPNClient/OpenVpnConfigs/example
+```
+
+From a release artifact, place the downloaded `awsvpn` binary somewhere on your
+`PATH` and run the same command.
+
 ## Connect with the Bundled Runtime
 
 Build as your normal user, then run only the built binary with `sudo`.
@@ -58,3 +70,22 @@ cargo run -- diagnose
 On macOS, the diagnostic command reports active DNS servers, whether private
 VPN DNS is present, `utun` route count, and whether AWS script logs exist. It
 does not read or print SAML responses, management passwords, or login URLs.
+
+## Release Builds
+
+GitHub Actions builds native self-contained binaries for:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+
+Each CI job builds the AWS-patched OpenVPN runtime for that target, stages it
+under `assets/openvpn-runtime/<target>/openvpn`, and then compiles `awsvpn` with
+that runtime embedded.
+
+## Licensing
+
+This repository is licensed as GPL-2.0-only because release binaries can embed
+and redistribute OpenVPN. See `THIRD_PARTY_NOTICES.md` for runtime source and
+third-party details.

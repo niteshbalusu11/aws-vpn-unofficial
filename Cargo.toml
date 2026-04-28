@@ -2,6 +2,11 @@
 name = "aws-vpn-unofficial"
 version = "0.1.0"
 edition = "2024"
+description = "Unofficial Rust library and CLI for AWS Client VPN SAML profiles"
+readme = "README.md"
+license = "GPL-2.0-only"
+keywords = ["aws", "vpn", "openvpn", "saml", "cli"]
+categories = ["command-line-utilities", "network-programming"]
 
 [lib]
 name = "awsvpn"
