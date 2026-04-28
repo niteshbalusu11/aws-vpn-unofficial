@@ -47,8 +47,13 @@ async fn main() {
 
     if let Err(err) = run(cli).await {
         tracing::error!("{err}");
-        if matches!(err, Error::OpenVpnNotFound) {
-            tracing::warn!("hint: pass the AWS-patched OpenVPN binary with --openvpn <path>");
+        if matches!(
+            err,
+            Error::OpenVpnNotFound | Error::BundledOpenVpnUnavailable { .. }
+        ) {
+            tracing::warn!(
+                "hint: build or install a bundled runtime, or pass the AWS-patched OpenVPN binary with --openvpn <path>"
+            );
         }
         std::process::exit(1);
     }

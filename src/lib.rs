@@ -11,9 +11,11 @@ mod error;
 mod event;
 pub mod logredact;
 pub mod openvpn;
+mod runtime;
 pub mod saml;
 
 pub use client::{BrowserMode, ConnectOptions, DnsMode, LogLevel, VpnClient, VpnSession};
 pub use diagnose::{Diagnostics, RouteEntry, collect_diagnostics};
 pub use error::{Error, Result};
 pub use event::{ExitReason, VpnEvent};
+pub use runtime::{OpenVpnRuntime, bundled_runtime_available, bundled_runtime_target};

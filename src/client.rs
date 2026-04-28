@@ -2,6 +2,7 @@ use crate::config::OvpnConfigSummary;
 use crate::dns::{NativeDnsGuard, configure_native_dns};
 use crate::openvpn::management::ManagementClient;
 use crate::openvpn::process::{OpenVpnLaunchOptions, OpenVpnPrepared, OpenVpnProcess};
+use crate::runtime::{OpenVpnRuntime, RuntimeDeployment, deploy_openvpn_runtime};
 use crate::saml::acs::SamlAcsServer;
 use crate::saml::flow::drive_saml_auth;
 use crate::{Error, ExitReason, Result, VpnEvent};
@@ -33,7 +34,7 @@ pub enum LogLevel {
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub config_path: PathBuf,
-    pub openvpn_binary: Option<PathBuf>,
+    pub openvpn_runtime: OpenVpnRuntime,
     pub management_host: IpAddr,
     pub management_port: Option<u16>,
     pub acs_host: IpAddr,
@@ -50,7 +51,7 @@ impl ConnectOptions {
     pub fn new(config_path: impl Into<PathBuf>) -> Self {
         Self {
             config_path: config_path.into(),
-            openvpn_binary: None,
+            openvpn_runtime: OpenVpnRuntime::Bundled,
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: None,
             acs_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -65,7 +66,12 @@ impl ConnectOptions {
     }
 
     pub fn with_openvpn_binary(mut self, path: impl Into<PathBuf>) -> Self {
-        self.openvpn_binary = Some(path.into());
+        self.openvpn_runtime = OpenVpnRuntime::External(path.into());
+        self
+    }
+
+    pub fn with_openvpn_runtime(mut self, runtime: OpenVpnRuntime) -> Self {
+        self.openvpn_runtime = runtime;
         self
     }
 
@@ -119,7 +125,7 @@ impl ConnectOptions {
             ));
         }
 
-        if let Some(openvpn_binary) = &self.openvpn_binary {
+        if let OpenVpnRuntime::External(openvpn_binary) = &self.openvpn_runtime {
             validate_file(openvpn_binary, "OpenVPN binary")?;
         }
 
@@ -168,10 +174,8 @@ impl VpnClient {
     pub async fn connect(&self, options: ConnectOptions) -> Result<VpnSession> {
         options.validate()?;
         tracing::debug!(config = %options.config_path.display(), "validated VPN config");
-        let openvpn_binary = options
-            .openvpn_binary
-            .clone()
-            .ok_or(Error::OpenVpnNotFound)?;
+        let runtime_deployment = deploy_openvpn_runtime(&options.openvpn_runtime)?;
+        let openvpn_binary = runtime_deployment.binary().to_path_buf();
 
         tracing::debug!(host = %options.acs_host, port = options.acs_port, "binding SAML ACS server");
         let acs =
@@ -247,6 +251,7 @@ impl VpnClient {
             management: Some(management),
             event_rx: options.event_tx.is_none().then_some(event_rx),
             dns_guard,
+            _runtime_deployment: runtime_deployment,
         })
     }
 }
@@ -257,6 +262,7 @@ pub struct VpnSession {
     management: Option<ManagementClient>,
     event_rx: Option<mpsc::UnboundedReceiver<VpnEvent>>,
     dns_guard: Option<NativeDnsGuard>,
+    _runtime_deployment: RuntimeDeployment,
 }
 
 impl VpnSession {

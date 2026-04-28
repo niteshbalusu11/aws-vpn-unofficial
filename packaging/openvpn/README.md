@@ -47,6 +47,21 @@ Nix-backed native build:
 nix develop -c packaging/openvpn/build-openvpn.sh
 ```
 
+Build and stage the runtime as an embedded Rust asset:
+
+```bash
+nix develop -c env EMBED_RUNTIME=1 packaging/openvpn/build-openvpn.sh
+```
+
+That copies the staged runtime into:
+
+```text
+assets/openvpn-runtime/<target>/openvpn/
+```
+
+`build.rs` embeds files from that directory into the `awsvpn` executable for
+the matching Cargo target.
+
 Target override:
 
 ```bash
@@ -63,6 +78,7 @@ WORK_DIR                build work directory
 DIST_DIR                staged runtime output directory
 OPENSSL_TARGET          OpenSSL Configure target override
 OPENVPN_CONFIGURE_ARGS  extra OpenVPN ./configure arguments
+EMBED_RUNTIME           when set to 1, copy staged runtime into assets/openvpn-runtime
 JOBS                    make parallelism
 ```
 
@@ -86,6 +102,5 @@ what AWS publishes.
 ## Current Limitations
 
 - Cross compilation is not fully automated yet.
-- Linux DNS integration is handled by Rust-side follow-up work, not this script.
-- macOS DNS helper scripts still need replacement before we can be fully
-  independent of AWS's app bundle scripts.
+- Linux DNS helper scripts are not implemented yet. Linux currently requires a
+  native DNS integration path or `--dns disabled`.
