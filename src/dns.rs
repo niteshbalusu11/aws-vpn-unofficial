@@ -51,6 +51,7 @@ fn configure_native_dns_impl(
         "\
 d.init
 d.add ServerAddresses * {server_values}
+d.add SupplementalMatchDomains * openvpn
 d.add SearchDomains * openvpn
 d.add DomainName openvpn
 set State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS

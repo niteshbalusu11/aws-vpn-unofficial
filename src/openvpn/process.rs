@@ -24,6 +24,8 @@ pub struct OpenVpnLaunchOptions {
     pub management_host: IpAddr,
     pub management_port: Option<u16>,
     pub configure_dns: bool,
+    pub ignore_default_route: bool,
+    pub ignore_pushed_routes: bool,
 }
 
 #[derive(Debug)]
@@ -102,6 +104,16 @@ impl OpenVpnPrepared {
 
         if self.options.configure_dns {
             args.extend(self.dns_script_args());
+        }
+
+        if self.options.ignore_pushed_routes {
+            args.push("--route-nopull".to_string());
+        } else if self.options.ignore_default_route {
+            args.extend([
+                "--pull-filter".to_string(),
+                "ignore".to_string(),
+                "redirect-gateway".to_string(),
+            ]);
         }
 
         args
@@ -432,6 +444,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             management_port: Some(47000),
             configure_dns: true,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap_err();
 
@@ -446,6 +460,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap();
 
@@ -496,6 +512,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap();
 
@@ -556,6 +574,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: true,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap();
 
@@ -587,6 +607,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap();
 
@@ -594,6 +616,45 @@ mod tests {
         assert!(!args.contains(&"--up".to_string()));
         assert!(!args.contains(&"--down".to_string()));
         assert!(!args.contains(&"--script-security".to_string()));
+    }
+
+    #[test]
+    fn can_ignore_pushed_default_route() {
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: PathBuf::from("/bin/echo"),
+            config: PathBuf::from("/tmp/client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: false,
+            ignore_default_route: true,
+            ignore_pushed_routes: false,
+        })
+        .unwrap();
+
+        assert!(
+            prepared
+                .args()
+                .windows(3)
+                .any(|window| window == ["--pull-filter", "ignore", "redirect-gateway"])
+        );
+    }
+
+    #[test]
+    fn can_ignore_all_pushed_routes() {
+        let prepared = OpenVpnPrepared::new(OpenVpnLaunchOptions {
+            binary: PathBuf::from("/bin/echo"),
+            config: PathBuf::from("/tmp/client.ovpn"),
+            management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            management_port: Some(47000),
+            configure_dns: false,
+            ignore_default_route: false,
+            ignore_pushed_routes: true,
+        })
+        .unwrap();
+
+        let args = prepared.args();
+        assert!(args.contains(&"--route-nopull".to_string()));
+        assert!(!args.contains(&"--pull-filter".to_string()));
     }
 
     #[test]
@@ -608,6 +669,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47000),
             configure_dns: false,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap_err();
 
@@ -625,6 +688,8 @@ mod tests {
             management_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             management_port: Some(47001),
             configure_dns: true,
+            ignore_default_route: false,
+            ignore_pushed_routes: false,
         })
         .unwrap();
 

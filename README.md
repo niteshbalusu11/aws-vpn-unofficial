@@ -84,6 +84,18 @@ Skip VPN DNS configuration when another tool manages DNS:
 sudo awsvpn connect --dns disabled
 ```
 
+Keep normal internet routing even if the VPN endpoint pushes a default route:
+
+```bash
+sudo awsvpn connect --no-default-route
+```
+
+Ignore all VPN-pushed routes while debugging route-related hangs:
+
+```bash
+sudo awsvpn connect --no-pushed-routes
+```
+
 Use an explicit AWS-patched OpenVPN binary instead of the bundled runtime:
 
 ```bash
@@ -94,6 +106,47 @@ Run diagnostics after connecting:
 
 ```bash
 sudo awsvpn diagnose
+```
+
+## Troubleshooting Networking Hangs
+
+If public networking hangs while the VPN is connected, first separate routing
+from DNS:
+
+```bash
+ping 1.1.1.1
+ping github.com
+```
+
+If `ping 1.1.1.1` hangs, the VPN endpoint probably pushed a default route and
+your internet traffic is going through the VPN. Reconnect with:
+
+```bash
+sudo awsvpn disconnect
+sudo awsvpn connect --no-default-route
+```
+
+If public networking still hangs, check whether the endpoint pushed broad route
+directives. Reconnect with all VPN-pushed routes disabled:
+
+```bash
+sudo awsvpn disconnect
+sudo awsvpn connect --no-pushed-routes
+```
+
+If `ping 1.1.1.1` works but `ping github.com` hangs, the issue is DNS. Reconnect
+without VPN DNS while debugging:
+
+```bash
+sudo awsvpn disconnect
+sudo awsvpn connect --dns disabled
+```
+
+On macOS, you can inspect the active resolver state with:
+
+```bash
+scutil --dns
+netstat -rn -f inet
 ```
 
 ## Connect with the Bundled Runtime
@@ -133,13 +186,13 @@ binary. It extracts that runtime to a private temporary directory for the life
 of the VPN process, then runs OpenVPN as a child process. Use `--openvpn <path>`
 only when you want to override the bundled runtime for development or debugging.
 
-By default, the CLI uses `--dns openvpn`. When the bundled runtime contains
-`client.up` and `client.down`, the launcher passes temporary no-space symlinks
-to OpenVPN so helper scripts can install pushed DNS and restore it on
-disconnect. When those scripts are not present, the CLI captures pushed DNS
-from OpenVPN and installs a temporary native macOS DNS resolver with `scutil`.
-On Linux, the native fallback uses `systemd-resolved` through `resolvectl` when
-available, then falls back to `resolvconf`.
+By default, the CLI uses `--dns openvpn`. On macOS, bundled helper scripts
+install pushed VPN DNS as a scoped resolver for the pushed search/domain suffixes
+so public DNS stays on the normal network resolver. When those scripts are not
+present, the CLI captures pushed DNS from OpenVPN and installs a temporary
+scoped native macOS DNS resolver with `scutil`. On Linux, the native fallback
+uses `systemd-resolved` through `resolvectl` when available, then falls back to
+`resolvconf`.
 
 Use `--dns disabled` to skip those scripts. User-provided OpenVPN configs with
 script or plugin directives are rejected because this CLI is commonly run with

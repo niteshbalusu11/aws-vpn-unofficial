@@ -26,6 +26,13 @@ pub enum DnsMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteMode {
+    OpenVpnDefault,
+    IgnoreDefaultRoute,
+    IgnorePushedRoutes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Info,
     Debug,
@@ -43,6 +50,7 @@ pub struct ConnectOptions {
     pub browser: BrowserMode,
     pub log_level: LogLevel,
     pub dns_mode: DnsMode,
+    pub route_mode: RouteMode,
     pub print_login_url: bool,
     pub event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
 }
@@ -60,6 +68,7 @@ impl ConnectOptions {
             browser: BrowserMode::System,
             log_level: LogLevel::Info,
             dns_mode: DnsMode::OpenVpnDefault,
+            route_mode: RouteMode::OpenVpnDefault,
             print_login_url: false,
             event_tx: None,
         }
@@ -92,6 +101,11 @@ impl ConnectOptions {
 
     pub fn with_dns_mode(mut self, dns_mode: DnsMode) -> Self {
         self.dns_mode = dns_mode;
+        self
+    }
+
+    pub fn with_route_mode(mut self, route_mode: RouteMode) -> Self {
+        self.route_mode = route_mode;
         self
     }
 
@@ -187,6 +201,8 @@ impl VpnClient {
             management_host: options.management_host,
             management_port: options.management_port,
             configure_dns: matches!(options.dns_mode, DnsMode::OpenVpnDefault),
+            ignore_default_route: matches!(options.route_mode, RouteMode::IgnoreDefaultRoute),
+            ignore_pushed_routes: matches!(options.route_mode, RouteMode::IgnorePushedRoutes),
         })?;
         let openvpn_configures_dns = prepared.uses_dns_scripts();
 

@@ -107,8 +107,21 @@ pub async fn drive_saml_auth(
             }
             ManagementEvent::Log(message) => {
                 if let Some(options) = parse_pushed_options(&message) {
-                    tracing::debug!(dns_servers = ?options.dns_servers, "captured pushed DNS options");
-                    dns_servers = options.dns_servers;
+                    if !options.dns_servers.is_empty() {
+                        tracing::debug!(dns_servers = ?options.dns_servers, "captured pushed DNS options");
+                        dns_servers = options.dns_servers;
+                    }
+                    if options.redirects_default_gateway {
+                        tracing::warn!(
+                            "VPN endpoint pushed a default route; if public networking hangs, reconnect with --no-default-route"
+                        );
+                        emit(
+                            &event_tx,
+                            VpnEvent::Warning {
+                                message: "VPN endpoint pushed a default route; if public networking hangs, reconnect with --no-default-route".to_string(),
+                            },
+                        );
+                    }
                 }
             }
             ManagementEvent::Ignored => {}

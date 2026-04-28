@@ -3,8 +3,8 @@ use awsvpn::daemon::{
     ControlRequest, ControlResponse, ControlServer, DaemonPaths, SessionState, SessionStatus,
 };
 use awsvpn::{
-    BrowserMode, ConnectOptions, Diagnostics, DnsMode, Error, LogLevel, VpnClient, VpnEvent,
-    collect_diagnostics,
+    BrowserMode, ConnectOptions, Diagnostics, DnsMode, Error, LogLevel, RouteMode, VpnClient,
+    VpnEvent, collect_diagnostics,
 };
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
@@ -74,6 +74,18 @@ struct ConnectArgs {
 
     #[arg(long, default_value = "openvpn", value_parser = parse_dns_mode)]
     dns: DnsMode,
+
+    #[arg(
+        long,
+        help = "Ignore VPN-pushed default routes and keep normal internet routing outside the VPN"
+    )]
+    no_default_route: bool,
+
+    #[arg(
+        long,
+        help = "Ignore all VPN-pushed routes; useful for isolating route-related networking hangs"
+    )]
+    no_pushed_routes: bool,
 }
 
 #[tokio::main]
@@ -156,7 +168,14 @@ fn connect_options(args: &ConnectArgs) -> ConnectOptions {
         })
         .with_browser_mode(browser_mode)
         .with_print_login_url(args.print_login_url)
-        .with_dns_mode(args.dns);
+        .with_dns_mode(args.dns)
+        .with_route_mode(if args.no_pushed_routes {
+            RouteMode::IgnorePushedRoutes
+        } else if args.no_default_route {
+            RouteMode::IgnoreDefaultRoute
+        } else {
+            RouteMode::OpenVpnDefault
+        });
 
     if let Some(openvpn) = &args.openvpn {
         options = options.with_openvpn_binary(openvpn.clone());
@@ -507,6 +526,12 @@ fn connect_args_for_child(args: &ConnectArgs) -> Vec<String> {
     }
     if args.print_login_url {
         values.push("--print-login-url".to_string());
+    }
+    if args.no_default_route {
+        values.push("--no-default-route".to_string());
+    }
+    if args.no_pushed_routes {
+        values.push("--no-pushed-routes".to_string());
     }
     values.push("--dns".to_string());
     values.push(format_dns_mode(args.dns).to_string());

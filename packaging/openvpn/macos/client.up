@@ -131,6 +131,7 @@ apply_dns() {
   /usr/sbin/scutil <<EOF >/dev/null
 d.init
 d.add ServerAddresses * $dns_servers
+d.add SupplementalMatchDomains * $search_domains
 d.add SearchDomains * $search_domains
 d.add DomainName $domain_name
 set State:/Network/Service/$psid/DNS
@@ -154,4 +155,4 @@ save_existing_dns "$psid"
 apply_dns "$psid"
 flush_dns_cache
 
-log "configured DNS servers [$dns_servers] on primary service $psid"
+log "configured scoped DNS servers [$dns_servers] for domains [$search_domains] on primary service $psid"

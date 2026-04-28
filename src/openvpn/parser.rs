@@ -30,6 +30,7 @@ pub struct SamlChallenge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushedOptions {
     pub dns_servers: Vec<Ipv4Addr>,
+    pub redirects_default_gateway: bool,
 }
 
 pub fn parse_management_line(line: &str) -> Result<ManagementEvent> {
@@ -129,8 +130,14 @@ pub fn parse_pushed_options(line: &str) -> Option<PushedOptions> {
     let payload = &line[start + "PUSH_REPLY,".len()..];
     let payload = payload.trim_end_matches('\'');
     let mut dns_servers = Vec::new();
+    let mut redirects_default_gateway = false;
 
     for option in payload.split(',').map(str::trim) {
+        if option == "redirect-gateway" || option.starts_with("redirect-gateway ") {
+            redirects_default_gateway = true;
+            continue;
+        }
+
         let Some(rest) = option.strip_prefix("dhcp-option ") else {
             continue;
         };
@@ -151,7 +158,10 @@ pub fn parse_pushed_options(line: &str) -> Option<PushedOptions> {
         }
     }
 
-    (!dns_servers.is_empty()).then_some(PushedOptions { dns_servers })
+    (redirects_default_gateway || !dns_servers.is_empty()).then_some(PushedOptions {
+        dns_servers,
+        redirects_default_gateway,
+    })
 }
 
 fn parse_state(line: &str) -> Option<ManagementEvent> {
@@ -259,8 +269,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            options.dns_servers,
-            vec!["192.0.2.53".parse::<Ipv4Addr>().unwrap()]
+            options,
+            PushedOptions {
+                dns_servers: vec!["192.0.2.53".parse::<Ipv4Addr>().unwrap()],
+                redirects_default_gateway: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pushed_default_route() {
+        let options = parse_pushed_options(
+            "123,,PUSH: Received control message: 'PUSH_REPLY,redirect-gateway def1,dhcp-option DNS 192.0.2.53'",
+        )
+        .unwrap();
+
+        assert_eq!(
+            options,
+            PushedOptions {
+                dns_servers: vec!["192.0.2.53".parse::<Ipv4Addr>().unwrap()],
+                redirects_default_gateway: true,
+            }
         );
     }
 
