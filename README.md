@@ -35,7 +35,16 @@ invoking desktop user's home directory.
 ```bash
 sudo awsvpn connect
 sudo awsvpn status
+sudo awsvpn reconnect
 sudo awsvpn disconnect
+```
+
+Short aliases are available for the common commands:
+
+```bash
+sudo awsvpn c   # connect
+sudo awsvpn r   # reconnect
+sudo awsvpn d   # disconnect
 ```
 
 Pass a profile path when you do not want the default

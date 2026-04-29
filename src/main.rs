@@ -32,6 +32,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(visible_alias = "c")]
     Connect {
         #[command(flatten)]
         args: ConnectArgs,
@@ -39,7 +40,16 @@ enum Command {
         #[arg(long, help = "Keep the VPN session attached to this terminal")]
         foreground: bool,
     },
+    #[command(visible_alias = "d")]
     Disconnect,
+    #[command(visible_alias = "r")]
+    Reconnect {
+        #[command(flatten)]
+        args: ConnectArgs,
+
+        #[arg(long, help = "Keep the VPN session attached to this terminal")]
+        foreground: bool,
+    },
     Status,
     Diagnose,
     #[command(hide = true)]
@@ -116,7 +126,9 @@ fn init_tracing(cli: &Cli) {
 impl Cli {
     fn debug_enabled(&self) -> bool {
         match &self.command {
-            Command::Connect { args, .. } | Command::DaemonRun { args } => args.debug,
+            Command::Connect { args, .. }
+            | Command::Reconnect { args, .. }
+            | Command::DaemonRun { args } => args.debug,
             Command::Diagnose => false,
             Command::Disconnect | Command::Status => false,
         }
@@ -133,6 +145,7 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
             }
         }
         Command::Disconnect => disconnect_daemon().await,
+        Command::Reconnect { args, foreground } => reconnect(args, foreground).await,
         Command::Status => status_daemon().await,
         Command::DaemonRun { args } => run_daemon_runner(args).await,
         Command::Diagnose => {
@@ -141,6 +154,44 @@ async fn run(cli: Cli) -> awsvpn::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn reconnect(args: ConnectArgs, foreground: bool) -> awsvpn::Result<()> {
+    match disconnect_daemon().await {
+        Ok(()) => wait_for_daemon_shutdown().await?,
+        Err(Error::DaemonUnavailable) => {
+            tracing::info!("daemon is not running; connecting");
+        }
+        Err(err) => return Err(err),
+    }
+
+    if foreground {
+        run_foreground_connect(args).await
+    } else {
+        run_daemon_connect(args).await
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_daemon_shutdown() -> awsvpn::Result<()> {
+    let paths = DaemonPaths::default_for_current_user()?;
+    let deadline = time::Instant::now() + Duration::from_secs(2);
+
+    while paths.socket.exists() {
+        if time::Instant::now() >= deadline {
+            return Err(Error::DaemonControl(
+                "timed out waiting for daemon control socket cleanup".to_string(),
+            ));
+        }
+        time::sleep(Duration::from_millis(50)).await;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn wait_for_daemon_shutdown() -> awsvpn::Result<()> {
+    Ok(())
 }
 
 fn connect_options(args: &ConnectArgs) -> ConnectOptions {
