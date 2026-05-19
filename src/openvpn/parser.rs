@@ -30,6 +30,13 @@ pub struct SamlChallenge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushedOptions {
     pub dns_servers: Vec<Ipv4Addr>,
+    pub routes: Vec<PushedRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushedRoute {
+    pub network: Ipv4Addr,
+    pub netmask: Ipv4Addr,
 }
 
 pub fn parse_management_line(line: &str) -> Result<ManagementEvent> {
@@ -129,29 +136,49 @@ pub fn parse_pushed_options(line: &str) -> Option<PushedOptions> {
     let payload = &line[start + "PUSH_REPLY,".len()..];
     let payload = payload.trim_end_matches('\'');
     let mut dns_servers = Vec::new();
+    let mut routes = Vec::new();
 
     for option in payload.split(',').map(str::trim) {
-        let Some(rest) = option.strip_prefix("dhcp-option ") else {
-            continue;
-        };
+        if let Some(rest) = option.strip_prefix("dhcp-option ") {
+            let mut parts = rest.split_whitespace();
+            if parts.next() != Some("DNS") {
+                continue;
+            }
 
-        let mut parts = rest.split_whitespace();
-        if parts.next() != Some("DNS") {
-            continue;
+            let Some(raw_addr) = parts.next() else {
+                continue;
+            };
+
+            if let Ok(addr) = raw_addr.parse::<Ipv4Addr>()
+                && !dns_servers.contains(&addr)
+            {
+                dns_servers.push(addr);
+            }
         }
 
-        let Some(raw_addr) = parts.next() else {
-            continue;
-        };
+        if let Some(rest) = option.strip_prefix("route ") {
+            let mut parts = rest.split_whitespace();
+            let Some(raw_network) = parts.next() else {
+                continue;
+            };
+            let raw_netmask = parts.next().unwrap_or("255.255.255.255");
 
-        if let Ok(addr) = raw_addr.parse::<Ipv4Addr>() {
-            if !dns_servers.contains(&addr) {
-                dns_servers.push(addr);
+            if let (Ok(network), Ok(netmask)) = (
+                raw_network.parse::<Ipv4Addr>(),
+                raw_netmask.parse::<Ipv4Addr>(),
+            ) {
+                let route = PushedRoute { network, netmask };
+                if !routes.contains(&route) {
+                    routes.push(route);
+                }
             }
         }
     }
 
-    (!dns_servers.is_empty()).then_some(PushedOptions { dns_servers })
+    (!dns_servers.is_empty() || !routes.is_empty()).then_some(PushedOptions {
+        dns_servers,
+        routes,
+    })
 }
 
 fn parse_state(line: &str) -> Option<ManagementEvent> {
@@ -261,6 +288,30 @@ mod tests {
         assert_eq!(
             options.dns_servers,
             vec!["192.0.2.53".parse::<Ipv4Addr>().unwrap()]
+        );
+        assert_eq!(
+            options.routes,
+            vec![PushedRoute {
+                network: "203.0.113.0".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_pushed_route_without_dns() {
+        let options = parse_pushed_options(
+            "123,,PUSH: Received control message: 'PUSH_REPLY,route 10.24.0.0 255.255.0.0'",
+        )
+        .unwrap();
+
+        assert!(options.dns_servers.is_empty());
+        assert_eq!(
+            options.routes,
+            vec![PushedRoute {
+                network: "10.24.0.0".parse().unwrap(),
+                netmask: "255.255.0.0".parse().unwrap(),
+            }]
         );
     }
 

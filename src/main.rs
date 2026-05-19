@@ -22,6 +22,10 @@ const DEFAULT_CONFIG_RELATIVE_PATH: &str = ".awsvpnunofficial/vpnconfig.ovpn";
 const DAEMON_READY_LINE: &str = "__AWSVPN_DAEMON_READY__";
 #[cfg(unix)]
 const DAEMON_ERROR_PREFIX: &str = "__AWSVPN_DAEMON_ERROR__\t";
+#[cfg(unix)]
+const AUTO_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(2);
+#[cfg(unix)]
+const AUTO_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Parser)]
 #[command(name = "awsvpn", version, about = "Unofficial AWS Client VPN CLI")]
@@ -355,7 +359,7 @@ async fn run_daemon_runner(args: ConnectArgs) -> awsvpn::Result<()> {
     });
 
     let client = VpnClient::new();
-    let session = match client.connect(options).await {
+    let session = match client.connect(options.clone()).await {
         Ok(session) => session,
         Err(err) => {
             event_task.abort();
@@ -371,7 +375,7 @@ async fn run_daemon_runner(args: ConnectArgs) -> awsvpn::Result<()> {
     println!("{DAEMON_READY_LINE}");
     let _ = std::io::stdout().flush();
 
-    run_daemon_control_loop(server, paths, session, daemon_pid).await
+    run_daemon_control_loop(server, paths, session, options, daemon_pid).await
 }
 
 #[cfg(not(unix))]
@@ -385,23 +389,73 @@ async fn run_daemon_runner(_args: ConnectArgs) -> awsvpn::Result<()> {
 async fn run_daemon_control_loop(
     server: ControlServer,
     paths: DaemonPaths,
-    mut session: awsvpn::VpnSession,
+    session: awsvpn::VpnSession,
+    options: ConnectOptions,
     daemon_pid: u32,
 ) -> awsvpn::Result<()> {
     let mut tick = time::interval(Duration::from_secs(1));
+    let mut session = Some(session);
+    let mut reconnect = None::<ReconnectAttempt>;
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if session.try_wait()?.is_some() {
-                    paths.cleanup();
-                    return Ok(());
+                if let Some(active_session) = &mut session
+                    && active_session.try_wait()?.is_some()
+                {
+                    tracing::warn!("OpenVPN exited unexpectedly; scheduling reconnect");
+                    session = None;
+                    reconnect = Some(start_reconnect_attempt(options.clone(), 1));
+                    let _ = awsvpn::daemon::write_state(
+                        &paths,
+                        &connecting_status(daemon_pid),
+                    );
+                }
+
+                if let Some(attempt) = reconnect.take() {
+                    if attempt.task.is_finished() {
+                        match attempt.task.await {
+                            Ok(Ok(new_session)) => {
+                                tracing::info!("daemon reconnected VPN session");
+                                let status = session_status(&new_session, SessionState::Connected, daemon_pid);
+                                awsvpn::daemon::write_state(&paths, &status)?;
+                                session = Some(new_session);
+                            }
+                            Ok(Err(err)) => {
+                                let next_attempt = attempt.attempt.saturating_add(1);
+                                tracing::warn!(attempt = attempt.attempt, error = %err, "daemon reconnect attempt failed");
+                                reconnect = Some(start_reconnect_attempt(options.clone(), next_attempt));
+                                let _ = awsvpn::daemon::write_state(
+                                    &paths,
+                                    &connecting_status(daemon_pid),
+                                );
+                            }
+                            Err(err) => {
+                                let next_attempt = attempt.attempt.saturating_add(1);
+                                tracing::warn!(attempt = attempt.attempt, error = %err, "daemon reconnect task failed");
+                                reconnect = Some(start_reconnect_attempt(options.clone(), next_attempt));
+                                let _ = awsvpn::daemon::write_state(
+                                    &paths,
+                                    &connecting_status(daemon_pid),
+                                );
+                            }
+                        }
+                    } else {
+                        reconnect = Some(attempt);
+                    }
                 }
             }
             signal = shutdown_signal() => {
                 let signal = signal?;
                 tracing::info!(signal, "daemon disconnecting");
-                let result = session.disconnect().await;
+                let result = if let Some(mut active_session) = session.take() {
+                    active_session.disconnect().await
+                } else {
+                    if let Some(attempt) = reconnect.take() {
+                        attempt.task.abort();
+                    }
+                    Ok(())
+                };
                 paths.cleanup();
                 return result;
             }
@@ -410,15 +464,35 @@ async fn run_daemon_control_loop(
                 let request = connection.read_request().await?;
                 match request {
                     ControlRequest::Status => {
-                        let status = session_status(&session, SessionState::Connected, daemon_pid);
+                        let status = if let Some(active_session) = &session {
+                            session_status(active_session, SessionState::Connected, daemon_pid)
+                        } else {
+                            connecting_status(daemon_pid)
+                        };
                         connection
                             .write_response(&ControlResponse::Ok(status))
                             .await?;
                     }
                     ControlRequest::Disconnect => {
-                        let status = session_status(&session, SessionState::Disconnecting, daemon_pid);
+                        let status = if let Some(active_session) = &session {
+                            session_status(active_session, SessionState::Disconnecting, daemon_pid)
+                        } else {
+                            SessionStatus {
+                                state: SessionState::Disconnecting,
+                                daemon_pid,
+                                openvpn_pid: None,
+                                vpn_ip: None,
+                            }
+                        };
                         let _ = awsvpn::daemon::write_state(&paths, &status);
-                        let result = session.disconnect().await;
+                        let result = if let Some(mut active_session) = session.take() {
+                            active_session.disconnect().await
+                        } else {
+                            if let Some(attempt) = reconnect.take() {
+                                attempt.task.abort();
+                            }
+                            Ok(())
+                        };
                         match &result {
                             Ok(()) => {
                                 connection
@@ -437,6 +511,45 @@ async fn run_daemon_control_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(unix)]
+struct ReconnectAttempt {
+    attempt: u32,
+    task: tokio::task::JoinHandle<awsvpn::Result<awsvpn::VpnSession>>,
+}
+
+#[cfg(unix)]
+fn start_reconnect_attempt(options: ConnectOptions, attempt: u32) -> ReconnectAttempt {
+    let delay = reconnect_delay(attempt);
+    let task = tokio::spawn(async move {
+        tracing::info!(
+            attempt,
+            delay_secs = delay.as_secs(),
+            "waiting before reconnect"
+        );
+        time::sleep(delay).await;
+        VpnClient::new().connect(options).await
+    });
+
+    ReconnectAttempt { attempt, task }
+}
+
+#[cfg(unix)]
+fn reconnect_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(5);
+    let delay = AUTO_RECONNECT_INITIAL_DELAY.saturating_mul(1 << exponent);
+    delay.min(AUTO_RECONNECT_MAX_DELAY)
+}
+
+#[cfg(unix)]
+fn connecting_status(daemon_pid: u32) -> SessionStatus {
+    SessionStatus {
+        state: SessionState::Connecting,
+        daemon_pid,
+        openvpn_pid: None,
+        vpn_ip: None,
     }
 }
 
@@ -709,4 +822,18 @@ fn format_dns_servers(diagnostics: &Diagnostics) -> String {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_delay_backs_off_and_caps() {
+        assert_eq!(reconnect_delay(1), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(2), Duration::from_secs(4));
+        assert_eq!(reconnect_delay(3), Duration::from_secs(8));
+        assert_eq!(reconnect_delay(10), Duration::from_secs(60));
+    }
 }

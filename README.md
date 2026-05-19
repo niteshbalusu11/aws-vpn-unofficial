@@ -124,6 +124,9 @@ and commit the result.
 `awsvpn diagnose` reports active DNS servers, VPN DNS, and tunnel routes without
 printing SAML responses, management passwords, or login URLs.
 
+See `docs/reliability.md` for the AWS Client VPN reliability comparison,
+implemented safeguards, and the manual soak checklist.
+
 ## Licensing
 
 This repository is licensed as GPL-2.0-only because release binaries can embed

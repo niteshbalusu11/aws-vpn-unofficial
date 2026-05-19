@@ -70,8 +70,10 @@ fn configure_native_dns_impl(
     }
     flush_macos_dns_cache();
 
+    let monitor = MacosDnsMonitor::start(primary_service.clone());
+
     Ok(Some(NativeDnsGuard {
-        macos: Some(MacosDnsGuard { proxy }),
+        macos: Some(MacosDnsGuard { proxy, monitor }),
     }))
 }
 
@@ -119,10 +121,7 @@ fn restore_native_dns_impl(guard: &mut NativeDnsGuard) -> Result<()> {
         return Ok(());
     };
 
-    let restore_result = restore_macos_system_dns();
-    drop(macos);
-
-    restore_result
+    macos.restore()
 }
 
 #[cfg(target_os = "linux")]
@@ -142,12 +141,74 @@ fn restore_native_dns_impl(_guard: &mut NativeDnsGuard) -> Result<()> {
 #[derive(Debug)]
 struct MacosDnsGuard {
     proxy: DnsProxyGuard,
+    monitor: MacosDnsMonitor,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosDnsGuard {
+    fn restore(mut self) -> Result<()> {
+        restore_macos_dns_guard_order(
+            || self.monitor.stop(),
+            restore_macos_system_dns,
+            || self.proxy.stop(),
+        )
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn restore_macos_dns_guard_order(
+    mut stop_monitor: impl FnMut(),
+    mut restore_dns: impl FnMut() -> Result<()>,
+    mut stop_proxy: impl FnMut(),
+) -> Result<()> {
+    stop_monitor();
+    let restore_result = restore_dns();
+    stop_proxy();
+    restore_result
 }
 
 #[cfg(target_os = "macos")]
 impl Drop for MacosDnsGuard {
     fn drop(&mut self) {
+        self.monitor.stop();
         self.proxy.stop();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacosDnsMonitor {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosDnsMonitor {
+    fn start(primary_service: String) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let monitor_shutdown = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || {
+            monitor_macos_dns(primary_service, monitor_shutdown);
+        });
+
+        Self {
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacosDnsMonitor {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -351,6 +412,43 @@ fn forward_dns_tcp(query: &[u8], upstreams: &[SocketAddr]) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
+fn monitor_macos_dns(primary_service: String, shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Relaxed) {
+        if !wait_for_macos_dns_check_interval(&shutdown) {
+            break;
+        }
+
+        match macos_dns_uses_local_proxy(&primary_service) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    primary_service,
+                    "macOS DNS settings drifted from VPN resolver; restoring"
+                );
+                if let Err(err) = repair_macos_dns(&primary_service) {
+                    tracing::warn!(error = %err, "could not restore macOS VPN DNS settings");
+                }
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "could not inspect macOS VPN DNS settings");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_macos_dns_check_interval(shutdown: &AtomicBool) -> bool {
+    for _ in 0..50 {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    !shutdown.load(Ordering::Relaxed)
+}
+
+#[cfg(target_os = "macos")]
 fn macos_primary_service_id() -> Result<String> {
     let output = run_scutil_capture("show State:/Network/Global/IPv4\n")?;
     for line in output.lines() {
@@ -375,6 +473,21 @@ fn macos_primary_service_id() -> Result<String> {
 fn macos_scutil_key_exists(key: &str) -> Result<bool> {
     let output = run_scutil_capture(&format!("show {key}\n"))?;
     Ok(!output.contains("No such key"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dns_uses_local_proxy(primary_service: &str) -> Result<bool> {
+    let primary_dns_key = format!("State:/Network/Service/{primary_service}/DNS");
+    let output = run_scutil_capture(&format!("show {primary_dns_key}\n"))?;
+    if output.contains("No such key") {
+        return Ok(false);
+    }
+
+    Ok(scutil_array_contains(
+        &output,
+        "ServerAddresses",
+        MACOS_LOCAL_DNS,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -412,6 +525,25 @@ set {MACOS_STATE_ROOT}
     ));
 
     commands
+}
+
+#[cfg(target_os = "macos")]
+fn render_macos_dns_repair(primary_service: &str) -> String {
+    let primary_dns_key = format!("State:/Network/Service/{primary_service}/DNS");
+    format!(
+        "\
+d.init
+d.add ServerAddresses * {MACOS_LOCAL_DNS}
+set {primary_dns_key}
+"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn repair_macos_dns(primary_service: &str) -> Result<()> {
+    run_scutil(&render_macos_dns_repair(primary_service))?;
+    flush_macos_dns_cache();
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -480,6 +612,32 @@ fn scutil_state_value(output: &str, key: &str) -> Option<String> {
         let fields = line.split_whitespace().collect::<Vec<_>>();
         (fields.len() == 3 && fields[0] == key && fields[1] == ":").then(|| fields[2].to_string())
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn scutil_array_contains(output: &str, array_key: &str, expected: &str) -> bool {
+    let mut in_array = false;
+
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() >= 4 && fields[0] == array_key && fields[1] == ":" && fields[2] == "<array>"
+        {
+            in_array = true;
+            continue;
+        }
+
+        if in_array {
+            if fields.len() >= 2 && fields[0] == "}" {
+                return false;
+            }
+
+            if fields.len() == 3 && fields[1] == ":" && fields[2] == expected {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -819,6 +977,86 @@ mod tests {
             config,
             "search openvpn\nnameserver 192.0.2.53\nnameserver 198.51.100.53\n"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detects_local_proxy_in_scutil_dns_array() {
+        let output = r#"
+<dictionary> {
+  SearchDomains : <array> {
+    0 : openvpn
+  }
+  ServerAddresses : <array> {
+    0 : 127.0.0.1
+  }
+}
+"#;
+
+        assert!(scutil_array_contains(
+            output,
+            "ServerAddresses",
+            "127.0.0.1"
+        ));
+        assert!(!scutil_array_contains(
+            output,
+            "ServerAddresses",
+            "172.31.0.2"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renders_macos_dns_repair_without_overwriting_saved_state() {
+        let commands = render_macos_dns_repair("C51D613A-60BE-42A3-888D-D15432602660");
+
+        assert!(commands.contains("d.add ServerAddresses * 127.0.0.1"));
+        assert!(
+            commands
+                .contains("set State:/Network/Service/C51D613A-60BE-42A3-888D-D15432602660/DNS")
+        );
+        assert!(!commands.contains("OldDNSState"));
+        assert!(!commands.contains("remove State:/Network/awsvpn"));
+    }
+
+    #[test]
+    fn stops_macos_dns_monitor_before_restore_and_proxy_after() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let monitor_events = std::rc::Rc::clone(&events);
+        let restore_events = std::rc::Rc::clone(&events);
+        let proxy_events = std::rc::Rc::clone(&events);
+
+        restore_macos_dns_guard_order(
+            || monitor_events.borrow_mut().push("monitor"),
+            || {
+                restore_events.borrow_mut().push("restore");
+                Ok(())
+            },
+            || proxy_events.borrow_mut().push("proxy"),
+        )
+        .unwrap();
+
+        assert_eq!(*events.borrow(), ["monitor", "restore", "proxy"]);
+    }
+
+    #[test]
+    fn stops_macos_dns_proxy_after_restore_failure() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let monitor_events = std::rc::Rc::clone(&events);
+        let restore_events = std::rc::Rc::clone(&events);
+        let proxy_events = std::rc::Rc::clone(&events);
+
+        let result = restore_macos_dns_guard_order(
+            || monitor_events.borrow_mut().push("monitor"),
+            || {
+                restore_events.borrow_mut().push("restore");
+                Err(Error::DnsConfigurationFailed("restore failed".to_string()))
+            },
+            || proxy_events.borrow_mut().push("proxy"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(*events.borrow(), ["monitor", "restore", "proxy"]);
     }
 
     #[test]

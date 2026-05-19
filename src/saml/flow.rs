@@ -2,7 +2,7 @@ use crate::openvpn::command::{
     ManagementCommand, acs_password, auth_username, saml_response_password,
 };
 use crate::openvpn::management::ManagementClient;
-use crate::openvpn::parser::{ManagementEvent, parse_pushed_options};
+use crate::openvpn::parser::{ManagementEvent, PushedRoute, parse_pushed_options};
 use crate::saml::acs::SamlAcsServer;
 use crate::saml::browser::{BrowserOpenResult, open_browser};
 use crate::{BrowserMode, Error, Result, VpnEvent};
@@ -13,6 +13,15 @@ use tokio::sync::mpsc;
 pub struct SamlAuthOutcome {
     pub vpn_ip: Option<IpAddr>,
     pub dns_servers: Vec<Ipv4Addr>,
+    pub routes: Vec<PushedRoute>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SamlFlowState {
+    active_state_id: Option<String>,
+    saml_response: Option<String>,
+    dns_servers: Vec<Ipv4Addr>,
+    routes: Vec<PushedRoute>,
 }
 
 pub async fn drive_saml_auth(
@@ -24,10 +33,7 @@ pub async fn drive_saml_auth(
 ) -> Result<SamlAuthOutcome> {
     management.enable_notifications_and_release_hold().await?;
 
-    let acs_port = acs.local_addr()?.port();
-    let mut active_state_id = None::<String>;
-    let mut saml_response = None::<String>;
-    let mut dns_servers = Vec::<Ipv4Addr>::new();
+    let mut state = SamlFlowState::default();
 
     loop {
         let Some(event) = management.read_event().await? else {
@@ -36,87 +42,133 @@ pub async fn drive_saml_auth(
             ));
         };
 
-        match event {
-            ManagementEvent::AuthPrompt => {
-                emit(&event_tx, VpnEvent::AuthPromptReceived);
-                match (&active_state_id, &saml_response) {
-                    (Some(state_id), Some(response)) => {
-                        tracing::debug!(
-                            "received repeated OpenVPN auth prompt; replaying SAML response"
-                        );
-                        send_saml_response(management, state_id, response).await?;
-                    }
-                    _ => {
-                        tracing::debug!("received initial OpenVPN auth prompt");
-                        management.send(&auth_username()).await?;
-                        management.send(&acs_password(acs_port)).await?;
-                    }
-                }
-            }
-            ManagementEvent::SamlChallenge(challenge) => {
-                if active_state_id.as_deref() == Some(challenge.state_id.as_str())
-                    && saml_response.is_some()
-                {
-                    tracing::debug!("ignoring duplicate SAML challenge after response was sent");
-                    continue;
-                }
-
-                tracing::info!("received SAML challenge from VPN endpoint");
-                emit(&event_tx, VpnEvent::SamlChallengeReceived);
-                if print_login_url {
-                    emit(
-                        &event_tx,
-                        VpnEvent::SamlLoginUrl {
-                            url: challenge.url.to_string(),
-                        },
-                    );
-                }
-                if open_browser(&challenge.url, browser)? == BrowserOpenResult::Opened {
-                    emit(&event_tx, VpnEvent::BrowserOpened);
-                }
-                tracing::debug!("waiting for SAML assertion callback");
-                let assertion = acs.receive_once().await?;
-                tracing::debug!("received SAML assertion callback");
-                emit(&event_tx, VpnEvent::SamlAssertionReceived);
-                tracing::debug!("sending SAML assertion response to OpenVPN");
-                let response = assertion.expose_for_openvpn().to_string();
-                send_saml_response(management, &challenge.state_id, &response).await?;
-                active_state_id = Some(challenge.state_id);
-                saml_response = Some(response);
-            }
-            ManagementEvent::Connected { vpn_ip } => {
-                tracing::info!(?vpn_ip, "VPN connected");
-                return Ok(SamlAuthOutcome {
-                    vpn_ip,
-                    dns_servers,
-                });
-            }
-            ManagementEvent::AuthFailed(message) => return Err(Error::AuthFailed(message)),
-            ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
-            ManagementEvent::Reconnecting { reason } => {
-                if reason.as_deref() == Some("auth-failure") {
-                    if active_state_id.is_some() {
-                        tracing::debug!(
-                            "releasing management hold after auth-failure reconnect during SAML flow"
-                        );
-                        management.send(&ManagementCommand::HoldRelease).await?;
-                        continue;
-                    }
-                    return Err(Error::AuthFailed("auth-failure".to_string()));
-                }
-            }
-            ManagementEvent::Log(message) => {
-                if let Some(options) = parse_pushed_options(&message) {
-                    tracing::debug!(dns_servers = ?options.dns_servers, "captured pushed DNS options");
-                    dns_servers = options.dns_servers;
-                }
-            }
-            ManagementEvent::Ignored => {}
+        if let Some(outcome) = handle_saml_management_event(
+            management,
+            acs,
+            browser,
+            print_login_url,
+            &event_tx,
+            &mut state,
+            false,
+            event,
+        )
+        .await?
+        {
+            tracing::info!(vpn_ip = ?outcome.vpn_ip, "VPN connected");
+            return Ok(outcome);
         }
     }
 }
 
-async fn send_saml_response(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_saml_management_event(
+    management: &mut ManagementClient,
+    acs: &SamlAcsServer,
+    browser: BrowserMode,
+    print_login_url: bool,
+    event_tx: &Option<mpsc::UnboundedSender<VpnEvent>>,
+    state: &mut SamlFlowState,
+    allow_auth_failure_reconnect: bool,
+    event: ManagementEvent,
+) -> Result<Option<SamlAuthOutcome>> {
+    let acs_port = acs.local_addr()?.port();
+
+    match event {
+        ManagementEvent::AuthPrompt => {
+            emit(event_tx, VpnEvent::AuthPromptReceived);
+            match (&state.active_state_id, &state.saml_response) {
+                (Some(state_id), Some(response)) => {
+                    tracing::debug!(
+                        "received repeated OpenVPN auth prompt; replaying SAML response"
+                    );
+                    send_saml_response(management, state_id, response).await?;
+                }
+                _ => {
+                    tracing::debug!("received OpenVPN auth prompt");
+                    management.send(&auth_username()).await?;
+                    management.send(&acs_password(acs_port)).await?;
+                }
+            }
+        }
+        ManagementEvent::SamlChallenge(challenge) => {
+            if state.active_state_id.as_deref() == Some(challenge.state_id.as_str())
+                && state.saml_response.is_some()
+            {
+                tracing::debug!("ignoring duplicate SAML challenge after response was sent");
+                return Ok(None);
+            }
+
+            tracing::info!("received SAML challenge from VPN endpoint");
+            emit(event_tx, VpnEvent::SamlChallengeReceived);
+            if print_login_url {
+                emit(
+                    event_tx,
+                    VpnEvent::SamlLoginUrl {
+                        url: challenge.url.to_string(),
+                    },
+                );
+            }
+            if open_browser(&challenge.url, browser)? == BrowserOpenResult::Opened {
+                emit(event_tx, VpnEvent::BrowserOpened);
+            }
+            tracing::debug!("waiting for SAML assertion callback");
+            let assertion = acs.receive_once().await?;
+            tracing::debug!("received SAML assertion callback");
+            emit(event_tx, VpnEvent::SamlAssertionReceived);
+            tracing::debug!("sending SAML assertion response to OpenVPN");
+            let response = assertion.expose_for_openvpn().to_string();
+            send_saml_response(management, &challenge.state_id, &response).await?;
+            state.active_state_id = Some(challenge.state_id);
+            state.saml_response = Some(response);
+        }
+        ManagementEvent::Connected { vpn_ip } => {
+            let outcome = SamlAuthOutcome {
+                vpn_ip,
+                dns_servers: state.dns_servers.clone(),
+                routes: state.routes.clone(),
+            };
+            state.active_state_id = None;
+            state.saml_response = None;
+            return Ok(Some(outcome));
+        }
+        ManagementEvent::AuthFailed(message) => return Err(Error::AuthFailed(message)),
+        ManagementEvent::Fatal(message) => return Err(Error::FatalOpenVpn(message)),
+        ManagementEvent::Reconnecting { reason } => {
+            emit(
+                event_tx,
+                VpnEvent::Reconnecting {
+                    reason: reason.clone(),
+                },
+            );
+            if reason.as_deref() == Some("auth-failure") {
+                if allow_auth_failure_reconnect || state.active_state_id.is_some() {
+                    tracing::debug!(
+                        "releasing management hold after auth-failure reconnect during SAML flow"
+                    );
+                    management.send(&ManagementCommand::HoldRelease).await?;
+                } else {
+                    return Err(Error::AuthFailed("auth-failure".to_string()));
+                }
+            }
+        }
+        ManagementEvent::Log(message) => {
+            if let Some(options) = parse_pushed_options(&message) {
+                tracing::debug!(
+                    dns_servers = ?options.dns_servers,
+                    routes = ?options.routes,
+                    "captured pushed options"
+                );
+                state.dns_servers = options.dns_servers;
+                state.routes = options.routes;
+            }
+        }
+        ManagementEvent::Ignored => {}
+    }
+
+    Ok(None)
+}
+
+pub(crate) async fn send_saml_response(
     management: &mut ManagementClient,
     state_id: &str,
     saml_response: &str,
