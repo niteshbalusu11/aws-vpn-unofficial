@@ -121,10 +121,7 @@ fn restore_native_dns_impl(guard: &mut NativeDnsGuard) -> Result<()> {
         return Ok(());
     };
 
-    let restore_result = restore_macos_system_dns();
-    drop(macos);
-
-    restore_result
+    macos.restore()
 }
 
 #[cfg(target_os = "linux")]
@@ -145,6 +142,29 @@ fn restore_native_dns_impl(_guard: &mut NativeDnsGuard) -> Result<()> {
 struct MacosDnsGuard {
     proxy: DnsProxyGuard,
     monitor: MacosDnsMonitor,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosDnsGuard {
+    fn restore(mut self) -> Result<()> {
+        restore_macos_dns_guard_order(
+            || self.monitor.stop(),
+            restore_macos_system_dns,
+            || self.proxy.stop(),
+        )
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn restore_macos_dns_guard_order(
+    mut stop_monitor: impl FnMut(),
+    mut restore_dns: impl FnMut() -> Result<()>,
+    mut stop_proxy: impl FnMut(),
+) -> Result<()> {
+    stop_monitor();
+    let restore_result = restore_dns();
+    stop_proxy();
+    restore_result
 }
 
 #[cfg(target_os = "macos")]
@@ -997,6 +1017,46 @@ mod tests {
         );
         assert!(!commands.contains("OldDNSState"));
         assert!(!commands.contains("remove State:/Network/awsvpn"));
+    }
+
+    #[test]
+    fn stops_macos_dns_monitor_before_restore_and_proxy_after() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let monitor_events = std::rc::Rc::clone(&events);
+        let restore_events = std::rc::Rc::clone(&events);
+        let proxy_events = std::rc::Rc::clone(&events);
+
+        restore_macos_dns_guard_order(
+            || monitor_events.borrow_mut().push("monitor"),
+            || {
+                restore_events.borrow_mut().push("restore");
+                Ok(())
+            },
+            || proxy_events.borrow_mut().push("proxy"),
+        )
+        .unwrap();
+
+        assert_eq!(*events.borrow(), ["monitor", "restore", "proxy"]);
+    }
+
+    #[test]
+    fn stops_macos_dns_proxy_after_restore_failure() {
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let monitor_events = std::rc::Rc::clone(&events);
+        let restore_events = std::rc::Rc::clone(&events);
+        let proxy_events = std::rc::Rc::clone(&events);
+
+        let result = restore_macos_dns_guard_order(
+            || monitor_events.borrow_mut().push("monitor"),
+            || {
+                restore_events.borrow_mut().push("restore");
+                Err(Error::DnsConfigurationFailed("restore failed".to_string()))
+            },
+            || proxy_events.borrow_mut().push("proxy"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(*events.borrow(), ["monitor", "restore", "proxy"]);
     }
 
     #[test]
