@@ -243,8 +243,7 @@ impl VpnClient {
             event_tx.clone(),
             Arc::clone(&vpn_ip),
         );
-        let route_monitor =
-            spawn_route_monitor(openvpn.pid(), outcome.routes.clone(), event_tx.clone());
+        let route_monitor = spawn_route_monitor(outcome.routes.clone(), event_tx.clone());
         let dns_guard =
             if matches!(options.dns_mode, DnsMode::OpenVpnDefault) && !openvpn_configures_dns {
                 if outcome.dns_servers.is_empty() {
@@ -366,7 +365,7 @@ fn spawn_reconnect_monitor(
     vpn_ip: Arc<Mutex<Option<IpAddr>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(err) = monitor_reconnects(
+        match monitor_reconnects(
             &mut management,
             &acs,
             browser,
@@ -376,29 +375,38 @@ fn spawn_reconnect_monitor(
         )
         .await
         {
-            tracing::warn!(error = %err, "OpenVPN management reconnect monitor stopped");
-            let _ = event_tx.send(VpnEvent::Warning {
-                message: format!("OpenVPN management reconnect monitor stopped: {err}"),
-            });
+            Ok(MonitorExit::ManagementClosed) => {
+                tracing::warn!(
+                    "OpenVPN management socket closed; reconnect monitor stopped for this session"
+                );
+                let _ = event_tx.send(VpnEvent::Warning {
+                    message:
+                        "OpenVPN management socket closed; reconnect monitor stopped for this session"
+                            .to_string(),
+                });
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "OpenVPN management reconnect monitor stopped");
+                let _ = event_tx.send(VpnEvent::Warning {
+                    message: format!("OpenVPN management reconnect monitor stopped: {err}"),
+                });
+            }
         }
     })
 }
 
 fn spawn_route_monitor(
-    pid: Option<u32>,
     routes: Vec<PushedRoute>,
     event_tx: mpsc::UnboundedSender<VpnEvent>,
 ) -> Option<JoinHandle<()>> {
-    spawn_route_monitor_impl(pid, routes, event_tx)
+    spawn_route_monitor_impl(routes, event_tx)
 }
 
 #[cfg(target_os = "macos")]
 fn spawn_route_monitor_impl(
-    pid: Option<u32>,
     routes: Vec<PushedRoute>,
     event_tx: mpsc::UnboundedSender<VpnEvent>,
 ) -> Option<JoinHandle<()>> {
-    let pid = pid?;
     (!routes.is_empty()).then(|| {
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(10));
@@ -409,15 +417,12 @@ fn spawn_route_monitor_impl(
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::warn!(
-                            pid,
                             routes = ?routes,
-                            "VPN route table drift detected; restarting OpenVPN"
+                            "VPN route table drift detected; reconnect may be required"
                         );
                         let _ = event_tx.send(VpnEvent::Warning {
-                            message: "VPN route table drift detected; restarting OpenVPN"
-                                .to_string(),
+                            message: route_drift_warning_message().to_string(),
                         });
-                        terminate_process(pid);
                         break;
                     }
                     Err(err) => {
@@ -431,11 +436,15 @@ fn spawn_route_monitor_impl(
 
 #[cfg(not(target_os = "macos"))]
 fn spawn_route_monitor_impl(
-    _pid: Option<u32>,
     _routes: Vec<PushedRoute>,
     _event_tx: mpsc::UnboundedSender<VpnEvent>,
 ) -> Option<JoinHandle<()>> {
     None
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn route_drift_warning_message() -> &'static str {
+    "VPN route table drift detected; reconnect may be required"
 }
 
 #[cfg(target_os = "macos")]
@@ -538,11 +547,9 @@ fn prefix_mask(prefix: u8) -> u32 {
     }
 }
 
-#[cfg(unix)]
-fn terminate_process(pid: u32) {
-    unsafe {
-        let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorExit {
+    ManagementClosed,
 }
 
 async fn monitor_reconnects(
@@ -552,13 +559,13 @@ async fn monitor_reconnects(
     print_login_url: bool,
     event_tx: Option<mpsc::UnboundedSender<VpnEvent>>,
     vpn_ip: Arc<Mutex<Option<IpAddr>>>,
-) -> Result<()> {
+) -> Result<MonitorExit> {
     let mut state = SamlFlowState::default();
 
     loop {
         let Some(event) = management.read_event().await? else {
             tracing::debug!("OpenVPN management socket closed");
-            return Ok(());
+            return Ok(MonitorExit::ManagementClosed);
         };
 
         if let Some(outcome) = handle_saml_management_event(
@@ -680,8 +687,39 @@ mod tests {
         }
 
         fake_openvpn.await.unwrap();
-        monitor.await.unwrap().unwrap();
+        assert_eq!(
+            monitor.await.unwrap().unwrap(),
+            MonitorExit::ManagementClosed
+        );
         assert_eq!(*vpn_ip.lock().unwrap(), Some("10.0.0.11".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn reconnect_monitor_reports_management_socket_closure() {
+        let acs = SamlAcsServer::bind_localhost(0, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let management_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let management_addr = management_listener.local_addr().unwrap();
+        let fake_openvpn = tokio::spawn(async move {
+            let (_stream, _) = management_listener.accept().await.unwrap();
+        });
+
+        let mut management = ManagementClient::connect(management_addr).await.unwrap();
+        let exit = monitor_reconnects(
+            &mut management,
+            &acs,
+            BrowserMode::Disabled,
+            false,
+            None,
+            Arc::new(Mutex::new(Some("10.0.0.10".parse().unwrap()))),
+        )
+        .await
+        .unwrap();
+
+        fake_openvpn.await.unwrap();
+        assert_eq!(exit, MonitorExit::ManagementClosed);
     }
 
     #[test]
@@ -728,6 +766,15 @@ Destination        Gateway            Flags               Netif Expire
                 netmask: "255.255.255.0".parse().unwrap(),
             }],
         ));
+    }
+
+    #[test]
+    fn route_drift_warning_does_not_request_restart() {
+        let message = route_drift_warning_message();
+
+        assert!(message.contains("route table drift"));
+        assert!(!message.contains("restart"));
+        assert!(!message.contains("restarting"));
     }
 
     async fn expect_line(reader: &mut BufReader<TcpStream>, expected: &str) {
