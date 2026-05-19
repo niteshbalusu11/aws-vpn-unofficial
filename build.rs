@@ -111,7 +111,7 @@ fn is_executable(path: &Path, relative: &str) -> io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return Ok(fs::metadata(path)?.permissions().mode() & 0o111 != 0);
+        Ok(fs::metadata(path)?.permissions().mode() & 0o111 != 0)
     }
 
     #[cfg(not(unix))]

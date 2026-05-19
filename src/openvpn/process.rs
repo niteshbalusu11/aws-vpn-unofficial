@@ -214,6 +214,7 @@ impl OpenVpnProcess {
             return Ok(());
         }
 
+        self.request_termination();
         match time::timeout(timeout, self.child.wait()).await {
             Ok(result) => {
                 result.map_err(Error::OpenVpnProcess)?;
@@ -225,6 +226,22 @@ impl OpenVpnProcess {
         }
         self.abort_log_tasks();
         Ok(())
+    }
+
+    fn request_termination(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            // Match OpenVPN's normal management shutdown behavior when the management
+            // socket is owned by the reconnect monitor.
+            unsafe {
+                let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.start_kill();
+        }
     }
 
     fn abort_log_tasks(&mut self) {
