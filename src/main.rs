@@ -555,8 +555,22 @@ fn connecting_status(daemon_pid: u32) -> SessionStatus {
 
 #[cfg(unix)]
 async fn disconnect_daemon() -> awsvpn::Result<()> {
-    match awsvpn::daemon::send_default(ControlRequest::Disconnect).await? {
+    match awsvpn::daemon::send_default(ControlRequest::Disconnect).await {
+        Err(Error::DaemonUnavailable) => {
+            awsvpn::cleanup_stale_native_dns()?;
+            tracing::info!("disconnected");
+            Ok(())
+        }
+        Err(err) => Err(err),
+        Ok(response) => handle_disconnect_response(response),
+    }
+}
+
+#[cfg(unix)]
+fn handle_disconnect_response(response: ControlResponse) -> awsvpn::Result<()> {
+    match response {
         ControlResponse::Disconnected => {
+            awsvpn::cleanup_stale_native_dns()?;
             tracing::info!("disconnected");
             Ok(())
         }

@@ -1,5 +1,5 @@
 use crate::config::OvpnConfigSummary;
-use crate::dns::{NativeDnsGuard, configure_native_dns};
+use crate::dns::{NativeDnsGuard, cleanup_stale_native_dns, configure_native_dns};
 use crate::openvpn::management::ManagementClient;
 use crate::openvpn::parser::PushedRoute;
 use crate::openvpn::process::{OpenVpnLaunchOptions, OpenVpnPrepared, OpenVpnProcess};
@@ -176,6 +176,7 @@ impl VpnClient {
 
     pub async fn connect(&self, options: ConnectOptions) -> Result<VpnSession> {
         options.validate()?;
+        cleanup_stale_native_dns()?;
         tracing::debug!(config = %options.config_path.display(), "validated VPN config");
         let runtime_deployment = deploy_openvpn_runtime(&options.openvpn_runtime)?;
         let openvpn_binary = runtime_deployment.binary().to_path_buf();

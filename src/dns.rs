@@ -48,6 +48,10 @@ pub fn configure_native_dns(
     configure_native_dns_impl(servers, vpn_ip)
 }
 
+pub fn cleanup_stale_native_dns() -> Result<()> {
+    cleanup_stale_native_dns_impl()
+}
+
 #[cfg(target_os = "macos")]
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
@@ -77,6 +81,11 @@ fn configure_native_dns_impl(
     }))
 }
 
+#[cfg(target_os = "macos")]
+fn cleanup_stale_native_dns_impl() -> Result<()> {
+    restore_macos_system_dns()
+}
+
 #[cfg(target_os = "linux")]
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
@@ -97,6 +106,11 @@ fn configure_native_dns_impl(
     Ok(Some(NativeDnsGuard { linux: Some(linux) }))
 }
 
+#[cfg(target_os = "linux")]
+fn cleanup_stale_native_dns_impl() -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn configure_native_dns_impl(
     servers: &[Ipv4Addr],
@@ -109,6 +123,11 @@ fn configure_native_dns_impl(
     Err(Error::DnsConfigurationFailed(
         "native DNS configuration is not implemented for this platform; use trusted OpenVPN helper scripts or --dns disabled".to_string(),
     ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn cleanup_stale_native_dns_impl() -> Result<()> {
+    Ok(())
 }
 
 fn restore_native_dns(guard: &mut NativeDnsGuard) -> Result<()> {
@@ -550,12 +569,8 @@ fn repair_macos_dns(primary_service: &str) -> Result<()> {
 fn restore_macos_system_dns() -> Result<()> {
     let state_key_exists = macos_scutil_key_exists(MACOS_STATE_ROOT)?;
     if !state_key_exists {
-        let commands = format!(
-            "\
-remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/DNS
-remove State:/Network/Service/{MACOS_DNS_SERVICE_KEY}/SMB
-"
-        );
+        let stale_primary_service = stale_macos_local_dns_service()?;
+        let commands = render_macos_dns_cleanup(stale_primary_service.as_deref(), false);
         run_scutil(&commands)?;
         flush_macos_dns_cache();
         return Ok(());
@@ -604,6 +619,38 @@ remove {MACOS_STATE_ROOT}
 "
     ));
     commands
+}
+
+#[cfg(target_os = "macos")]
+fn stale_macos_local_dns_service() -> Result<Option<String>> {
+    let Ok(primary_service) = macos_primary_service_id() else {
+        return Ok(None);
+    };
+    let uses_local_proxy = macos_dns_uses_local_proxy(&primary_service)?;
+
+    Ok(stale_macos_local_dns_service_from(
+        Some(primary_service),
+        uses_local_proxy,
+        macos_local_dns_proxy_accepts_tcp(),
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn stale_macos_local_dns_service_from(
+    primary_service: Option<String>,
+    uses_local_proxy: bool,
+    local_proxy_accepts_tcp: bool,
+) -> Option<String> {
+    primary_service.filter(|_| uses_local_proxy && !local_proxy_accepts_tcp)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_local_dns_proxy_accepts_tcp() -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, 53)),
+        Duration::from_millis(100),
+    )
+    .is_ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -1057,6 +1104,32 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(*events.borrow(), ["monitor", "restore", "proxy"]);
+    }
+
+    #[test]
+    fn detects_orphaned_macos_local_dns_proxy() {
+        assert_eq!(
+            stale_macos_local_dns_service_from(Some("service-1".to_string()), true, false),
+            Some("service-1".to_string())
+        );
+        assert_eq!(
+            stale_macos_local_dns_service_from(Some("service-1".to_string()), true, true),
+            None
+        );
+        assert_eq!(
+            stale_macos_local_dns_service_from(Some("service-1".to_string()), false, false),
+            None
+        );
+        assert_eq!(stale_macos_local_dns_service_from(None, true, false), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renders_stale_macos_local_dns_cleanup() {
+        let commands = render_macos_dns_cleanup(Some("service-1"), false);
+
+        assert!(commands.contains("remove State:/Network/Service/service-1/DNS"));
+        assert!(commands.contains("remove State:/Network/awsvpn"));
     }
 
     #[test]
